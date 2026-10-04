@@ -465,3 +465,10 @@ def test_actie_prijs():
     assert aanb.actie_prijs("2 voor 2,99") == 2.99 and aanb.actie_prijs("voor 4,49 per 350 gram") == 4.49
     assert aanb.actie_prijs("1+1 gratis") is None and aanb.actie_prijs("2e halve prijs") is None
     assert aanb.prijs_per_stuk(aanb.actie_prijs("2 voor 2,99"), "2 voor 2,99") == 1.495
+
+
+def test_korting_pct():
+    from custom_components.boodschappen.aanbiedingen import korting_pct
+    assert korting_pct("25% KORTING") == 0.25
+    assert korting_pct("UP TO 23% OFF") == 0.23
+    assert korting_pct("2 voor 2,99") is None

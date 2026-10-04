@@ -86,6 +86,12 @@ def actie_prijs(actie: Any) -> float | None:
     return float(f"{m.group(1)}.{m.group(2)}") if m else None
 
 
+def korting_pct(actie: Any) -> float | None:
+    """'25% KORTING' / '32% OFF' / 'UP TO 23% OFF' -> 0.25 / 0.32 / 0.23."""
+    m = re.search(r"(\d{1,2})\s*%", str(actie or ""))
+    return int(m.group(1)) / 100 if m else None
+
+
 def multibuy(actie: str) -> int:
     """'2 voor 4,99' / '2e halve prijs' / '1+1 gratis' -> 2; '3 voor 5' -> 3; anders 1."""
     a = (actie or "").lower()
@@ -159,6 +165,14 @@ def inslaad_advies(
     return advies, reden
 
 
+REGELS = (
+    "Let op: titels kunnen Engels zijn. Ook de variant moet kloppen: vers en diepvries zijn verschillend, "
+    "rookworst is geen rookvlees, jonge kaas is geen (extra) belegen/oude kaas of cheddar/smeltkaas, "
+    "kipfilet is geen kipdrumstick. Vage verzamelacties ('diverse wijnen', 'zomerwijnen', 'various') krijgen "
+    "hoogstens zeker 0.5, tenzij mijn product er duidelijk onder valt. "
+)
+
+
 def match_prompt(winkel: str, aanbod: list[dict] | None, tekst: str | None, producten: list[dict]) -> str:
     prod = "\n".join(f"{p['id']}: {p['name']}" for p in producten)
     if aanbod is not None:
@@ -169,14 +183,14 @@ def match_prompt(winkel: str, aanbod: list[dict] | None, tekst: str | None, prod
         taak = (
             f"Hieronder staan de aanbiedingen van {winkel} (sleutel: titel | merk | actie | prijs) en mijn vaste producten "
             "(id: naam). Geef ALLEEN aanbiedingen die echt over hetzelfde soort product gaan als een van mijn producten "
-            "(ander merk of verpakking mag; een andere productsoort niet; vers en diepvries zijn verschillende producten). "
+            "(ander merk of verpakking mag; een andere productsoort niet). " + REGELS +
             'Antwoord uitsluitend met JSON: [{"key": "...", "product_id": 123, "zeker": 0.0-1.0}]. Geen match: [].'
         )
         return f"{taak}\n\nAANBIEDINGEN:\n{bron}\n\nMIJN PRODUCTEN:\n{prod}"
     taak = (
         f"Hieronder staat de tekst van de aanbiedingenpagina van {winkel} en een lijst met mijn vaste producten (id: naam). "
         "Zoek de aanbiedingen die echt over hetzelfde soort product gaan als een van mijn producten (ander merk mag; "
-        "een andere productsoort niet; vers en diepvries zijn verschillende producten; 'alle X' telt als match voor X). "
+        "een andere productsoort niet; 'alle X' telt als match voor X). " + REGELS +
         'Antwoord uitsluitend met JSON: [{"titel": "...", "actie": "bijv. 2 voor 4,99 / 2e halve prijs / 1,49", '
         '"prijs": 1.49 of null, "geldig_tot": "YYYY-MM-DD" of null, "product_id": 123, "zeker": 0.0-1.0}]. Geen match: [].'
     )
@@ -378,9 +392,14 @@ class Aanbiedingen:
             normaal = _num(info.get("avg_price")) or _num(info.get("last_price"))
             if r.get("prijs") is None:
                 r = {**r, "prijs": actie_prijs(r.get("actie"))}
-            per_stuk = prijs_per_stuk(r.get("prijs"), str(r.get("actie") or ""))
-            stuks = stuks_in_verpakking(r.get("titel"), r.get("verpakking"), r.get("actie"))
-            if stuks == 1:
+            pct = korting_pct(r.get("actie"))
+            if r.get("prijs") is None and pct and normaal:
+                # alleen een percentage (bijv. coupon '25% korting'): reken met je eigen normale prijs per stuk
+                per_stuk, stuks = normaal * (1 - pct), 1
+            else:
+                per_stuk = prijs_per_stuk(r.get("prijs"), str(r.get("actie") or ""))
+                stuks = stuks_in_verpakking(r.get("titel"), r.get("verpakking"), r.get("actie"))
+            if stuks == 1 and r.get("prijs") is not None:
                 # anders: het aantal per verpakking dat bij de bonnetjes is gekoppeld (bijv. eieren = 6)
                 stuks = int(max([float(m.get("factor") or 1) for m in self.c.state.get("mappings", {}).values()
                                  if m.get("product_id") == pid] or [1]))
