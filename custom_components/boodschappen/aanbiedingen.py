@@ -95,6 +95,38 @@ def multibuy(actie: str) -> int:
     return 1
 
 
+def prijs_per_stuk(prijs: float | None, actie: str) -> float | None:
+    """Actieprijs omgerekend naar één stuk: '2 voor 1,49' -> 0,745; '2e halve prijs' bij 2,00 -> 1,50."""
+    if prijs is None:
+        return None
+    a = (actie or "").lower()
+    n = multibuy(a)
+    if re.search(r"\d+\s*voor\b", a) and n > 1:
+        return prijs / n
+    if re.search(r"(\d+)e\s+halve prijs", a):
+        return prijs * (n - 0.5) / n
+    if re.search(r"(\d+)\s*\+\s*(\d+)", a):
+        m = re.search(r"(\d+)\s*\+\s*(\d+)", a)
+        return prijs * int(m.group(1)) / n
+    return prijs
+
+
+def stuks_in_verpakking(*teksten: Any) -> int:
+    """'Scharreleieren 10 stuks' / '6 st.' / '4 x 125 g' -> 10 / 6 / 4; anders 1."""
+    for t in teksten:
+        m = re.search(r"(\d+)\s*(?:stuks?|st\b|st\.|x\b)", str(t or "").lower())
+        if m and 1 < int(m.group(1)) <= 48:
+            return int(m.group(1))
+    return 1
+
+
+def voordeel(normaal: float | None, actie_per_stuk: float | None) -> bool | None:
+    """True = goedkoper dan wat je normaal betaalt; None = niet te zeggen."""
+    if not normaal or actie_per_stuk is None:
+        return None
+    return actie_per_stuk < normaal * 0.97
+
+
 def inslaad_advies(
     *, wekelijks: float, gewoon: float, voorraad: float, houdbaar_dagen: int,
     invries_dagen: int, mag_invriezen: bool, actie: str, max_stuks: int = 12,
@@ -131,14 +163,14 @@ def match_prompt(winkel: str, aanbod: list[dict] | None, tekst: str | None, prod
         taak = (
             f"Hieronder staan de aanbiedingen van {winkel} (sleutel: titel | merk | actie | prijs) en mijn vaste producten "
             "(id: naam). Geef ALLEEN aanbiedingen die echt over hetzelfde soort product gaan als een van mijn producten "
-            "(ander merk of verpakking mag; een andere productsoort niet). "
+            "(ander merk of verpakking mag; een andere productsoort niet; vers en diepvries zijn verschillende producten). "
             'Antwoord uitsluitend met JSON: [{"key": "...", "product_id": 123, "zeker": 0.0-1.0}]. Geen match: [].'
         )
         return f"{taak}\n\nAANBIEDINGEN:\n{bron}\n\nMIJN PRODUCTEN:\n{prod}"
     taak = (
         f"Hieronder staat de tekst van de aanbiedingenpagina van {winkel} en een lijst met mijn vaste producten (id: naam). "
         "Zoek de aanbiedingen die echt over hetzelfde soort product gaan als een van mijn producten (ander merk mag; "
-        "een andere productsoort niet; 'alle X' telt als match voor X). "
+        "een andere productsoort niet; vers en diepvries zijn verschillende producten; 'alle X' telt als match voor X). "
         'Antwoord uitsluitend met JSON: [{"titel": "...", "actie": "bijv. 2 voor 4,99 / 2e halve prijs / 1,49", '
         '"prijs": 1.49 of null, "geldig_tot": "YYYY-MM-DD" of null, "product_id": 123, "zeker": 0.0-1.0}]. Geen match: [].'
     )
@@ -301,7 +333,7 @@ class Aanbiedingen:
         st["bijgewerkt"] = datetime.now().isoformat(timespec="minutes")
         st["genegeerd"] = [g for g in st["genegeerd"] if any(r["key"] == g for r in alles)]
         for r in alles:
-            if r["key"] not in st["gemeld"]:
+            if r["key"] not in st["gemeld"] and r.get("voordeel") is not False:
                 nieuw.append(r)
         st["gemeld"] = [r["key"] for r in alles]
         self.c.save()
@@ -335,9 +367,21 @@ class Aanbiedingen:
                 mag_invriezen=str(p.get("should_not_be_frozen", 0)) in ("0", "False", "false"),
                 actie=str(r.get("actie") or ""),
             )
+            normaal = _num(info.get("avg_price")) or _num(info.get("last_price"))
+            per_stuk = prijs_per_stuk(r.get("prijs"), str(r.get("actie") or ""))
+            stuks = stuks_in_verpakking(r.get("titel"), r.get("verpakking"), r.get("actie"))
+            if stuks == 1:
+                # anders: het aantal per verpakking dat bij de bonnetjes is gekoppeld (bijv. eieren = 6)
+                stuks = int(max([float(m.get("factor") or 1) for m in self.c.state.get("mappings", {}).values()
+                                 if m.get("product_id") == pid] or [1]))
+            if per_stuk is not None and stuks > 1:
+                per_stuk = per_stuk / stuks
+            goed = voordeel(normaal, per_stuk) if r.get("soort") != "coupon" else True
+            if goed is False:
+                advies = gewoon  # geen voordeel: niet inslaan
             uit.append({
                 **r, "winkel": winkel, "list_id": list_id, "product": p["name"],
-                "normale_prijs": _num(info.get("avg_price")) or _num(info.get("last_price")),
+                "normale_prijs": normaal, "prijs_per_stuk": _num(per_stuk), "voordeel": goed,
                 "voorraad": _num(info.get("stock_amount")) or 0, "gewoon": gewoon,
                 "advies": advies, "advies_reden": reden,
             })

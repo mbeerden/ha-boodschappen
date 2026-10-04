@@ -260,7 +260,9 @@ class BoodschappenPanel extends HTMLElement {
   }
 
   _aanbiedingen(lid) {
-    const lst = (this.data.aanbiedingen || []).filter((a) => a.list_id === lid);
+    const lst = (this.data.aanbiedingen || [])
+      .filter((a) => a.list_id === lid)
+      .sort((a, b) => (a.voordeel === false) - (b.voordeel === false));
     if (!lst.length) return "";
     const datum = (d) => {
       if (!d) return "";
@@ -272,13 +274,15 @@ class BoodschappenPanel extends HTMLElement {
         const prijs = a.prijs != null ? euro(a.prijs) : "";
         const oud = a.oude_prijs != null ? `<s>${euro(a.oude_prijs)}</s>` : "";
         const normaal = a.normale_prijs != null ? `jij betaalt normaal ${euro(a.normale_prijs)}` : "";
+        const geenVoordeel = a.voordeel === false;
         const wanneer = a.soort === "volgende week" && a.van ? `vanaf ${datum(a.van)}` : a.tot ? `t/m ${datum(a.tot)}` : "";
         const label = a.soort === "coupon" ? `<span class="chip info">Lidl Plus-coupon</span>` : a.soort === "volgende week" ? `<span class="chip">Volgende week</span>` : "";
-        const meer = Number(a.advies) > Number(a.gewoon);
-        return `<article class="deal">
+        const meer = !geenVoordeel && Number(a.advies) > Number(a.gewoon);
+        return `<article class="deal ${geenVoordeel ? "mat" : ""}">
           <div class="deal-kop"><b>${esc(a.product)}</b>${label}</div>
           <div class="deal-actie">${esc(a.actie || a.titel)} ${prijs ? `<span class="prijs">${prijs}</span>` : ""} ${oud}</div>
           <div class="deal-meta">${esc(a.titel)}${wanneer ? `, ${wanneer}` : ""}${normaal ? ` · ${normaal}` : ""}</div>
+          ${geenVoordeel ? `<p class="hint">Geen voordeel: je betaalt normaal minder${a.prijs_per_stuk != null ? ` (actie ${euro(a.prijs_per_stuk)} per stuk)` : ""}.</p>` : ""}
           <div class="deal-knoppen">
             ${a.op_lijst ? `<span class="op-lijst">Staat op je lijst</span>` : `
               <button class="sec-btn" data-act="dealadd" data-pid="${a.product_id}" data-amount="${a.gewoon}">+ ${fmtNum(a.gewoon)}</button>
@@ -662,6 +666,8 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; }
 .deal-knoppen { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
 .deal-knoppen .link { margin-left: auto; }
 .primary.klein { height: 40px; padding: 0 16px; }
+.deal.mat { opacity: .6; border-left-color: var(--rand); }
+.deal.mat .deal-actie { color: var(--secondary-text-color); }
 .op-lijst { font-size: 13px; color: var(--success-color, #2e7d32); font-weight: 500; }
 
 /* Bonnetjes */
@@ -706,4 +712,4 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; }
 }
 `;
 
-customElements.define("boodschappen-panel", BoodschappenPanel);
+if (!customElements.get("boodschappen-panel")) customElements.define("boodschappen-panel", BoodschappenPanel);

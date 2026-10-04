@@ -39,7 +39,7 @@ SERVICE_BON = "bon_verwerken"
 SERVICE_AANBIEDINGEN = "aanbiedingen_verversen"
 PANEL_URL = "boodschappen"
 STATIC_URL = "/boodschappen_static"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 
 BON_SCHEMA = vol.Schema(
     {

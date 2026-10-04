@@ -432,7 +432,10 @@ def test_aanbiedingen_ververs(monkeypatch):
     assert set(rows) == {("Lidl", "Eieren"), ("Lidl", "Pasta"), ("Jumbo", "Koffie")}   # grasmaaier (laag vertrouwen) eruit
     assert rows[("Lidl", "Eieren")]["normale_prijs"] == 0.25 and rows[("Lidl", "Eieren")]["prijs"] == 2.19
     assert rows[("Jumbo", "Koffie")]["advies"] % 2 == 0          # 2e halve prijs -> even aantal
-    assert len(res["nieuw"]) == 3 and len(services.calls) == 2
+    # eieren: 2,19 / 10 stuks = 0,22 < 0,25 -> voordeel; pasta 0,79 > 0,25 -> geen voordeel (niet gemeld)
+    assert rows[("Lidl", "Eieren")]["voordeel"] is True and rows[("Lidl", "Pasta")]["voordeel"] is False
+    assert rows[("Lidl", "Pasta")]["advies"] == rows[("Lidl", "Pasta")]["gewoon"]
+    assert {r["product"] for r in res["nieuw"]} == {"Eieren", "Koffie"} and len(services.calls) == 2
     # zichtbaar: pasta staat al op de lijst; negeren werkt
     z = {r["product"]: r for r in a.zichtbaar()}
     assert z["Pasta"]["op_lijst"] and not z["Eieren"]["op_lijst"]
@@ -441,3 +444,18 @@ def test_aanbiedingen_ververs(monkeypatch):
     # tweede ronde zonder wijzigingen: geen nieuwe AI-aanroepen, niets nieuw
     res2 = run(a.ververs())
     assert len(services.calls) == 2 and res2["nieuw"] == []
+
+
+def test_prijs_per_stuk_en_voordeel():
+    assert aanb.prijs_per_stuk(1.49, "2 voor 1,49") == 0.745
+    assert round(aanb.prijs_per_stuk(2.00, "2e halve prijs"), 2) == 1.50
+    assert aanb.prijs_per_stuk(3.00, "1+1 gratis") == 1.50
+    assert aanb.prijs_per_stuk(2.49, "voor 2,49") == 2.49
+    assert aanb.voordeel(2.99, 4.49) is False and aanb.voordeel(1.17, 0.745) is True
+    assert aanb.voordeel(None, 1.0) is None and aanb.voordeel(2.42, 2.40) is False   # minder dan 3% verschil telt niet
+
+
+def test_stuks_in_verpakking():
+    assert aanb.stuks_in_verpakking("Scharreleieren 10 stuks") == 10
+    assert aanb.stuks_in_verpakking("Kiwi", "6 st.") == 6 and aanb.stuks_in_verpakking("Yoghurt 4 x 125 g") == 4
+    assert aanb.stuks_in_verpakking("Pasta 500 g") == 1
