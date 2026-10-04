@@ -459,3 +459,9 @@ def test_stuks_in_verpakking():
     assert aanb.stuks_in_verpakking("Scharreleieren 10 stuks") == 10
     assert aanb.stuks_in_verpakking("Kiwi", "6 st.") == 6 and aanb.stuks_in_verpakking("Yoghurt 4 x 125 g") == 4
     assert aanb.stuks_in_verpakking("Pasta 500 g") == 1
+
+
+def test_actie_prijs():
+    assert aanb.actie_prijs("2 voor 2,99") == 2.99 and aanb.actie_prijs("voor 4,49 per 350 gram") == 4.49
+    assert aanb.actie_prijs("1+1 gratis") is None and aanb.actie_prijs("2e halve prijs") is None
+    assert aanb.prijs_per_stuk(aanb.actie_prijs("2 voor 2,99"), "2 voor 2,99") == 1.495

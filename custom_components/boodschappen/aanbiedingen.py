@@ -80,6 +80,12 @@ def euro(v: Any) -> float | None:
     return float(m.group(3))
 
 
+def actie_prijs(actie: Any) -> float | None:
+    """Bedrag uit een actietekst: '2 voor 2,99' -> 2.99; 'voor 4,49 per 350 gram' -> 4.49; '1+1 gratis' -> None."""
+    m = re.search(r"(\d+)[.,](\d{2})\b", str(actie or ""))
+    return float(f"{m.group(1)}.{m.group(2)}") if m else None
+
+
 def multibuy(actie: str) -> int:
     """'2 voor 4,99' / '2e halve prijs' / '1+1 gratis' -> 2; '3 voor 5' -> 3; anders 1."""
     a = (actie or "").lower()
@@ -368,6 +374,8 @@ class Aanbiedingen:
                 actie=str(r.get("actie") or ""),
             )
             normaal = _num(info.get("avg_price")) or _num(info.get("last_price"))
+            if r.get("prijs") is None:
+                r = {**r, "prijs": actie_prijs(r.get("actie"))}
             per_stuk = prijs_per_stuk(r.get("prijs"), str(r.get("actie") or ""))
             stuks = stuks_in_verpakking(r.get("titel"), r.get("verpakking"), r.get("actie"))
             if stuks == 1:
