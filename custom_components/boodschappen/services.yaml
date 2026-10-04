@@ -1,0 +1,25 @@
+weekvast_toevoegen:
+tekorten_toevoegen:
+bon_verwerken:
+  fields:
+    winkel:
+      required: true
+      example: Lidl
+      selector:
+        text:
+    datum:
+      example: "2026-10-03"
+      selector:
+        text:
+    bestand:
+      example: /media/bonnetjes/lidl/bon.jpg
+      selector:
+        text:
+    regels:
+      required: true
+      example: '[{"bon": "VRIJE UITLOOP EIEREN", "product": "Eieren", "grocy": "Eieren", "aantal": 2, "totaal": 3.78}]'
+      selector:
+        object:
+    opnieuw:
+      selector:
+        boolean:

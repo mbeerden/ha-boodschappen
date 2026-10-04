@@ -1,0 +1,58 @@
+{
+  "config": {
+    "step": {
+      "handmatig": {
+        "title": "Grocy connection",
+        "description": "No working Grocy integration found. Enter the Grocy URL and API key.",
+        "data": {
+          "url": "Grocy URL",
+          "port": "Port",
+          "api_key": "API key",
+          "verify_ssl": "Verify SSL"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to Grocy with these settings."
+    },
+    "abort": {
+      "already_configured": "Boodschappen is already set up."
+    }
+  },
+  "services": {
+    "weekvast_toevoegen": {
+      "name": "Add weekly fresh products",
+      "description": "Adds products with a 'wekelijks' (weekly) amount in Grocy to the list of their store."
+    },
+    "tekorten_toevoegen": {
+      "name": "Add products below minimum stock",
+      "description": "Adds products below their minimum stock in Grocy to the list of their store."
+    },
+    "bon_verwerken": {
+      "name": "Process receipt",
+      "description": "Processes receipt lines: prices on checked-off purchases, books unplanned purchases, queues unknown lines.",
+      "fields": {
+        "winkel": {
+          "name": "Store",
+          "description": "Lidl / Jumbo"
+        },
+        "datum": {
+          "name": "Date",
+          "description": "YYYY-MM-DD"
+        },
+        "bestand": {
+          "name": "File",
+          "description": "Receipt file path (prevents double processing)"
+        },
+        "regels": {
+          "name": "Lines",
+          "description": "[{bon, product, grocy, aantal, totaal}]"
+        },
+        "opnieuw": {
+          "name": "Again",
+          "description": "Process even if this file was processed before"
+        }
+      }
+    }
+  }
+}

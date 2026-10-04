@@ -1,0 +1,58 @@
+{
+  "config": {
+    "step": {
+      "handmatig": {
+        "title": "Grocy-verbinding",
+        "description": "Geen werkende Grocy-integratie gevonden. Vul de Grocy-URL en API-sleutel in.",
+        "data": {
+          "url": "Grocy-URL",
+          "port": "Poort",
+          "api_key": "API-sleutel",
+          "verify_ssl": "SSL controleren"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Kan met deze gegevens geen verbinding maken met Grocy."
+    },
+    "abort": {
+      "already_configured": "Boodschappen is al ingesteld."
+    }
+  },
+  "services": {
+    "weekvast_toevoegen": {
+      "name": "Vaste verse boodschappen toevoegen",
+      "description": "Zet producten met een 'wekelijks aantal' in Grocy op de lijst van hun winkel."
+    },
+    "tekorten_toevoegen": {
+      "name": "Tekorten toevoegen",
+      "description": "Zet producten onder de minimumvoorraad op de lijst van hun winkel."
+    },
+    "bon_verwerken": {
+      "name": "Bonnetje verwerken",
+      "description": "Verwerkt bonregels: prijs op afgevinkte aankopen, boekt ongeplande aankopen, zet onbekende regels klaar om te koppelen.",
+      "fields": {
+        "winkel": {
+          "name": "Winkel",
+          "description": "Lidl / Jumbo"
+        },
+        "datum": {
+          "name": "Datum",
+          "description": "YYYY-MM-DD"
+        },
+        "bestand": {
+          "name": "Bestand",
+          "description": "Pad van het bonnetje (dubbel verwerken voorkomen)"
+        },
+        "regels": {
+          "name": "Regels",
+          "description": "[{bon, product, grocy, aantal, totaal}]"
+        },
+        "opnieuw": {
+          "name": "Opnieuw",
+          "description": "Ook verwerken als dit bestand al verwerkt is"
+        }
+      }
+    }
+  }
+}

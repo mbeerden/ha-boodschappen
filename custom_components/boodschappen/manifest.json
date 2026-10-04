@@ -1,0 +1,21 @@
+{
+  "domain": "boodschappen",
+  "name": "Boodschappen",
+  "after_dependencies": [
+    "grocy"
+  ],
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [
+    "http",
+    "frontend",
+    "panel_custom",
+    "websocket_api",
+    "persistent_notification"
+  ],
+  "documentation": "https://github.com/mbeerden/ha-boodschappen",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/mbeerden/ha-boodschappen/issues",
+  "requirements": [],
+  "version": "0.3.0"
+}
