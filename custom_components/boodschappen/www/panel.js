@@ -276,7 +276,7 @@ class BoodschappenPanel extends HTMLElement {
         const normaal = a.normale_prijs != null ? `jij betaalt normaal ${euro(a.normale_prijs)}` : "";
         const geenVoordeel = a.voordeel === false;
         const wanneer = a.soort === "volgende week" && a.van ? `vanaf ${datum(a.van)}` : a.tot ? `t/m ${datum(a.tot)}` : "";
-        const label = a.soort === "coupon" ? `<span class="chip info">Lidl Plus-coupon</span>` : a.soort === "volgende week" ? `<span class="chip">Volgende week</span>` : "";
+        const label = a.soort === "coupon" ? `<span class="chip info">Lidl Plus-coupon${a.geactiveerd === false ? " – activeer in de app" : ""}</span>` : a.soort === "volgende week" ? `<span class="chip">Volgende week</span>` : "";
         const meer = !geenVoordeel && Number(a.advies) > Number(a.gewoon);
         return `<article class="deal ${geenVoordeel ? "mat" : ""}">
           <div class="deal-kop"><b>${esc(a.product)}</b>${label}</div>

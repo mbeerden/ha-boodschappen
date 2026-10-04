@@ -163,7 +163,7 @@ def match_prompt(winkel: str, aanbod: list[dict] | None, tekst: str | None, prod
     prod = "\n".join(f"{p['id']}: {p['name']}" for p in producten)
     if aanbod is not None:
         bron = "\n".join(
-            f"{a['key']}: {a.get('titel')} | {a.get('merk') or ''} | {a.get('actie') or ''} | prijs {a.get('prijs') or '-'}"
+            f"{a['key']}: {a.get('titel')}{(' - ' + a['omschrijving']) if a.get('omschrijving') else ''} | {a.get('merk') or ''} | {a.get('actie') or ''} | prijs {a.get('prijs') or '-'}"
             for a in aanbod
         )
         taak = (
@@ -209,7 +209,7 @@ class Aanbiedingen:
                     continue
                 soort = "coupon" if "coupon" in attr else ("volgende week" if "preview" in ent.entity_id else "folder")
                 for o in items:
-                    if not isinstance(o, dict):
+                    if not isinstance(o, dict) or o.get("is_online_shop") is True:
                         continue
                     titel = o.get("title") or o.get("name") or o.get("description")
                     if not titel:
@@ -222,6 +222,8 @@ class Aanbiedingen:
                         "van": o.get("start_date") or o.get("start_validity_date") or o.get("startValidityDate"),
                         "tot": o.get("end_date") or o.get("end_validity_date") or o.get("endValidityDate") or o.get("expiration_date"),
                         "soort": soort, "verpakking": o.get("packaging"),
+                        "omschrijving": o.get("description") if soort == "coupon" else None,
+                        "geactiveerd": o.get("activated") if soort == "coupon" else None,
                     })
         # dubbele (zelfde titel+periode) eruit
         uniek: dict[str, dict] = {}
