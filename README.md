@@ -8,6 +8,7 @@ Een eenvoudige boodschappenlijst per winkel bovenop [Grocy](https://grocy.info),
 - **Vaak gekocht**: je meest gekochte producten van de laatste 8 weken met één tik op de lijst; vastpinnen en verbergen kan.
 - **Vaste verse boodschappen**: producten met een Grocy-gebruikersveld `wekelijks` (getal) komen met één actie op de lijst.
 - **Tekorten**: producten onder de minimumvoorraad op de lijst van hun winkel.
+- **Aanbiedingen**: elke ochtend worden de aanbiedingen van Lidl (via de integratie [ha-lidl](https://github.com/FaserF/ha-lidl), incl. Lidl Plus-coupons en volgende week) en Jumbo (jumbo.com) gekoppeld aan je vaste producten, met je normale prijs en een inslaadvoorstel op basis van verbruik en houdbaarheid. Koppelen gebeurt met een AI-taak (`ai_task`, bijv. Google Gemini).
 - **Bonnetjes**: actie `boodschappen.bon_verwerken` zet de betaalde prijs op afgevinkte aankopen, boekt alleen ongeplande aankopen en zet onbekende bonregels klaar om te koppelen op de pagina *Boodschappen → Bonnetjes*. Koppelingen (inclusief "stuks per bonregel") worden onthouden.
 
 Daarnaast maakt de integratie `todo`-entiteiten per winkel, zodat de lijsten ook werken in de standaard To-do-weergave en met Assist ("zet melk op Boodschappen Lidl").

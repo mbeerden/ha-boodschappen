@@ -228,7 +228,7 @@ class BoodschappenPanel extends HTMLElement {
       if (!grp) groepen.push((grp = { g, items: [] }));
       grp.items.push(i);
     }
-    let html = "";
+    let html = this._aanbiedingen(lid);
     if (!todo.length) {
       html += `<div class="leeg"><p>Niets meer te halen hier.</p><p>Voeg hierboven iets toe, of vul de lijst aan:</p></div>`;
     } else {
@@ -257,6 +257,40 @@ class BoodschappenPanel extends HTMLElement {
       </section>`;
     }
     return html;
+  }
+
+  _aanbiedingen(lid) {
+    const lst = (this.data.aanbiedingen || []).filter((a) => a.list_id === lid);
+    if (!lst.length) return "";
+    const datum = (d) => {
+      if (!d) return "";
+      const x = new Date(String(d).slice(0, 10) + "T12:00:00");
+      return isNaN(x) ? esc(d) : x.toLocaleDateString("nl-NL", { weekday: "short", day: "numeric", month: "short" });
+    };
+    const kaarten = lst
+      .map((a) => {
+        const prijs = a.prijs != null ? euro(a.prijs) : "";
+        const oud = a.oude_prijs != null ? `<s>${euro(a.oude_prijs)}</s>` : "";
+        const normaal = a.normale_prijs != null ? `jij betaalt normaal ${euro(a.normale_prijs)}` : "";
+        const wanneer = a.soort === "volgende week" && a.van ? `vanaf ${datum(a.van)}` : a.tot ? `t/m ${datum(a.tot)}` : "";
+        const label = a.soort === "coupon" ? `<span class="chip info">Lidl Plus-coupon</span>` : a.soort === "volgende week" ? `<span class="chip">Volgende week</span>` : "";
+        const meer = Number(a.advies) > Number(a.gewoon);
+        return `<article class="deal">
+          <div class="deal-kop"><b>${esc(a.product)}</b>${label}</div>
+          <div class="deal-actie">${esc(a.actie || a.titel)} ${prijs ? `<span class="prijs">${prijs}</span>` : ""} ${oud}</div>
+          <div class="deal-meta">${esc(a.titel)}${wanneer ? `, ${wanneer}` : ""}${normaal ? ` · ${normaal}` : ""}</div>
+          <div class="deal-knoppen">
+            ${a.op_lijst ? `<span class="op-lijst">Staat op je lijst</span>` : `
+              <button class="sec-btn" data-act="dealadd" data-pid="${a.product_id}" data-amount="${a.gewoon}">+ ${fmtNum(a.gewoon)}</button>
+              ${meer ? `<button class="primary klein" data-act="dealadd" data-pid="${a.product_id}" data-amount="${a.advies}"
+                 title="${esc(a.advies_reden || "")}">Inslaan: ${fmtNum(a.advies)}</button>` : ""}`}
+            <button class="link" data-act="dealnee" data-key="${esc(a.key)}">Niet nu</button>
+          </div>
+          ${meer && !a.op_lijst ? `<p class="hint">${fmtNum(a.advies)} want ${esc(a.advies_reden || "")}${a.voorraad ? `, je hebt er nog ${fmtNum(a.voorraad)}` : ""}</p>` : ""}
+        </article>`;
+      })
+      .join("");
+    return `<section class="deals"><h2 class="sec deals-titel">In de aanbieding <small>${lst.length}</small></h2>${kaarten}</section>`;
   }
 
   _item(i) {
@@ -445,6 +479,10 @@ class BoodschappenPanel extends HTMLElement {
         return this._do({ type: "boodschappen/item_amount", item_id: id, amount: Number(b.dataset.amount) + 1 });
       case "min":
         return this._do({ type: "boodschappen/item_amount", item_id: id, amount: Number(b.dataset.amount) - 1 });
+      case "dealadd":
+        return this._do({ type: "boodschappen/item_add", list_id: Number(this.tab), product_id: Number(b.dataset.pid), amount: Number(b.dataset.amount) || 1 });
+      case "dealnee":
+        return this._do({ type: "boodschappen/aanbieding_negeer", key: b.dataset.key });
       case "favadd":
         return this._do({ type: "boodschappen/item_add", list_id: Number(this.tab), product_id: Number(b.dataset.pid), amount: Number(b.dataset.amount) || 1 });
       case "favedit":
@@ -609,6 +647,22 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; }
 .mandje .kop b { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: var(--zacht); }
 .mandje .item { box-shadow: none; background: transparent; min-height: 48px; }
 .wis { color: var(--error-color, #c62828); border-color: color-mix(in srgb, var(--error-color, #c62828) 40%, transparent); }
+
+/* Aanbiedingen */
+.deals { margin: 6px 0 14px; }
+.deals-titel { margin: 8px 4px 8px; display: flex; gap: 8px; align-items: baseline; }
+.deals-titel small { font-weight: 400; color: var(--secondary-text-color); }
+.deal { background: var(--card-background-color); border-radius: 14px; padding: 12px; margin-bottom: 8px;
+  box-shadow: 0 0 0 1px var(--rand) inset; border-left: 4px solid var(--route); }
+.deal-kop { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 17px; }
+.deal-actie { margin-top: 4px; font-size: 15px; font-weight: 600; color: var(--route); }
+.deal-actie .prijs { color: var(--primary-text-color); margin-left: 6px; }
+.deal-actie s { color: var(--secondary-text-color); font-weight: 400; margin-left: 4px; }
+.deal-meta { margin-top: 2px; font-size: 13px; color: var(--secondary-text-color); }
+.deal-knoppen { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.deal-knoppen .link { margin-left: auto; }
+.primary.klein { height: 40px; padding: 0 16px; }
+.op-lijst { font-size: 13px; color: var(--success-color, #2e7d32); font-weight: 500; }
 
 /* Bonnetjes */
 .sec { font-size: 15px; font-weight: 600; margin: 18px 4px 8px; }

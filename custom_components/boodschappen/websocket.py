@@ -54,6 +54,8 @@ def payload(c) -> dict[str, Any]:
         "bonnen": bonnen,
         "koppelingen": len(c.state["mappings"]),
         "favorieten": {str(k): v for k, v in c.favorites().items()},
+        "aanbiedingen": c.aanbiedingen.zichtbaar() if hasattr(c, "aanbiedingen") else [],
+        "aanbiedingen_info": {k: (c.state.get("aanbiedingen") or {}).get(k) for k in ("bijgewerkt", "fout")},
     }
 
 
@@ -119,6 +121,15 @@ async def _favoriet(c, msg):
     c.set_favorite(int(msg["product_id"]), msg["actie"])
 
 
+async def _aanb_negeer(c, msg):
+    c.aanbiedingen.negeer(msg["key"])
+
+
+async def _aanb_ververs(c, msg):
+    res = await c.aanbiedingen.ververs(forceer=True)
+    return res.get("aanbiedingen", 0)
+
+
 async def _bon_koppel(c, msg):
     await c.bon.koppel(msg["queue_id"], int(msg["product_id"]), float(msg.get("factor") or 1), bool(msg.get("onthouden", True)))
 
@@ -147,6 +158,8 @@ COMMANDS = [
     ({vol.Required("type"): "boodschappen/tekorten"}, _tekorten),
     ({vol.Required("type"): "boodschappen/favoriet", vol.Required("product_id"): int,
       vol.Required("actie"): vol.In(["vast", "verberg", "reset"])}, _favoriet),
+    ({vol.Required("type"): "boodschappen/aanbieding_negeer", vol.Required("key"): str}, _aanb_negeer),
+    ({vol.Required("type"): "boodschappen/aanbiedingen_ververs"}, _aanb_ververs),
     ({vol.Required("type"): "boodschappen/bon_koppel", vol.Required("queue_id"): str, vol.Required("product_id"): int,
       vol.Optional("factor"): vol.Coerce(float), vol.Optional("onthouden"): bool}, _bon_koppel),
     ({vol.Required("type"): "boodschappen/bon_negeer", vol.Required("queue_id"): str, vol.Optional("onthouden"): bool}, _bon_negeer),

@@ -53,6 +53,16 @@
           "description": "Process even if this file was processed before"
         }
       }
+    },
+    "aanbiedingen_verversen": {
+      "name": "Refresh offers",
+      "description": "Fetches Lidl and Jumbo offers and matches them to your regular products.",
+      "fields": {
+        "forceer": {
+          "name": "Force",
+          "description": "Re-match even if nothing changed"
+        }
+      }
     }
   }
 }

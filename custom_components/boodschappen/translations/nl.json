@@ -53,6 +53,16 @@
           "description": "Ook verwerken als dit bestand al verwerkt is"
         }
       }
+    },
+    "aanbiedingen_verversen": {
+      "name": "Aanbiedingen verversen",
+      "description": "Haalt de aanbiedingen van Lidl en Jumbo op en koppelt ze aan je vaste producten.",
+      "fields": {
+        "forceer": {
+          "name": "Forceer",
+          "description": "Ook opnieuw koppelen als er niets veranderd is"
+        }
+      }
     }
   }
 }

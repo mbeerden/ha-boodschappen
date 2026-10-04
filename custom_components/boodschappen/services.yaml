@@ -23,3 +23,8 @@ bon_verwerken:
     opnieuw:
       selector:
         boolean:
+aanbiedingen_verversen:
+  fields:
+    forceer:
+      selector:
+        boolean:

@@ -326,3 +326,118 @@ def test_set_favorite_toggles():
     assert c.state["favorieten"] == {"vast": [70], "verborgen": [3]}
     c.set_favorite(70, "reset"); c.set_favorite(3, "vast")
     assert c.state["favorieten"] == {"vast": [3], "verborgen": []}
+
+
+# --- aanbiedingen ------------------------------------------------------------
+from custom_components.boodschappen import aanbiedingen as aanb  # noqa: E402
+
+
+def test_aanbieding_helpers():
+    t = aanb.html_naar_tekst("<html><script>x=1</script><div>Koffie<br>2e halve prijs</div><span>wo 30 sep t/m di 6 okt</span></html>")
+    assert t.splitlines() == ["Koffie", "2e halve prijs", "wo 30 sep t/m di 6 okt"]
+    assert aanb.parse_json('```json\n[{"key": "a", "product_id": 3}]\n```') == [{"key": "a", "product_id": 3}]
+    assert aanb.parse_json("Hier: [1, 2] klaar") == [1, 2] and aanb.parse_json("geen json") is None
+    assert aanb.euro("1,49") == 1.49 and aanb.euro("€ 2") == 2.0 and aanb.euro("-") is None
+    assert aanb.multibuy("2 voor 4,99") == 2 and aanb.multibuy("2e halve prijs") == 2 and aanb.multibuy("1+1 gratis") == 2
+    assert aanb.multibuy("3 voor 5") == 3 and aanb.multibuy("-25%") == 1
+
+
+def test_inslaad_advies():
+    # houdbaar (pasta): 6 weken voorraad, 2 per week, nog 3 thuis -> 12-3 = 9
+    a, r = aanb.inslaad_advies(wekelijks=2, gewoon=1, voorraad=3, houdbaar_dagen=365, invries_dagen=0, mag_invriezen=True, actie="-30%")
+    assert (a, r) == (9.0, "lang houdbaar")
+    # vers vlees, invriesbaar (90 dagen): max 8 weken
+    a, r = aanb.inslaad_advies(wekelijks=1, gewoon=1, voorraad=0, houdbaar_dagen=4, invries_dagen=90, mag_invriezen=True, actie="1,99")
+    assert (a, r) == (8.0, "in te vriezen")
+    # vers, niet invriesbaar: hooguit ~1 week -> gewoon aantal; '2 voor' rondt af op 2
+    a, r = aanb.inslaad_advies(wekelijks=1, gewoon=1, voorraad=0, houdbaar_dagen=5, invries_dagen=0, mag_invriezen=False, actie="2 voor 3,00")
+    assert (a, r) == (2.0, "beperkt houdbaar")
+    # nooit meer dan het maximum
+    a, _ = aanb.inslaad_advies(wekelijks=10, gewoon=1, voorraad=0, houdbaar_dagen=-1, invries_dagen=0, mag_invriezen=True, actie="")
+    assert a == 12
+
+
+class _State:
+    def __init__(self, attrs):
+        self.attributes = attrs
+
+
+class _Ent:
+    def __init__(self, entity_id):
+        self.entity_id, self.platform = entity_id, "lidl"
+
+
+class _Reg:
+    def __init__(self, ids):
+        self.entities = {i: _Ent(i) for i in ids}
+
+
+class _States:
+    def __init__(self, m):
+        self.m = m
+
+    def get(self, eid):
+        return self.m.get(eid)
+
+    def async_entity_ids(self, domain):
+        return [e for e in self.m if e.startswith(domain + ".")]
+
+
+class _Services:
+    def __init__(self, antwoorden):
+        self.antwoorden, self.calls = antwoorden, []
+
+    async def async_call(self, domain, service, data, blocking=False, return_response=False):
+        self.calls.append(data["instructions"])
+        return {"data": self.antwoorden.pop(0)}
+
+
+def test_aanbiedingen_ververs(monkeypatch):
+    c = make_coordinator([{"id": 1, "product_id": 3, "amount": 1, "shopping_list_id": 1, "done": 0}])
+    c._purchases = [_p(70, 12, "2026-09-05"), _p(70, 12, "2026-09-19"), _p(3, 2, "2026-09-05"), _p(3, 2, "2026-09-19"),
+                    _p(65, 1, "2026-09-01"), _p(65, 1, "2026-09-20")]
+    lidl = {"discounts": [
+        {"id": "o1", "title": "Scharreleieren 10 stuks", "brand": "", "price": "2.19", "old_price": "2.79", "discount": "-21%",
+         "start_date": "2026-10-05", "end_date": "2099-10-11"},
+        {"id": "o2", "title": "Spaghetti", "price": "0.79", "old_price": "-", "discount": "-", "start_date": "2026-10-05", "end_date": "2099-10-11"},
+        {"id": "o3", "title": "Grasmaaier", "price": "199", "discount": "-", "start_date": "2026-10-05", "end_date": "2099-10-11"},
+    ]}
+    states = {"sensor.lidl_offers": _State(lidl), "ai_task.gemini": _State({})}
+    services = _Services([
+        '[{"key": "lidl:folder:o1", "product_id": 70, "zeker": 0.95}, {"key": "lidl:folder:o2", "product_id": 3, "zeker": 0.9},'
+        ' {"key": "lidl:folder:o3", "product_id": 3, "zeker": 0.2}]',
+        '```json\n[{"titel": "Alle Jumbo koffiebonen", "actie": "2e halve prijs", "prijs": null, "geldig_tot": "2099-10-06", "product_id": 65, "zeker": 0.9}]\n```',
+    ])
+
+    class FakeHass:
+        pass
+    hass = FakeHass()
+    hass.states, hass.services = _States(states), services
+    c.hass = hass
+    monkeypatch.setattr(aanb.er, "async_get", lambda h: _Reg(["sensor.lidl_offers"]))
+
+    async def jumbo_tekst(self):
+        return "Alle Jumbo koffiebonen\n2e halve prijs\nwo 30 sep t/m di 6 okt"
+    monkeypatch.setattr(aanb.Aanbiedingen, "_jumbo_tekst", jumbo_tekst)
+
+    async def api_get(path):
+        if path.startswith("/stock/products/"):
+            return {"stock_amount": 2, "avg_price": 0.25, "last_price": 0.27}
+        return {}
+    c.api.get = api_get
+
+    a = aanb.Aanbiedingen(c)
+    res = run(a.ververs())
+    rows = {(r["winkel"], r["product"]): r for r in a.state["resultaat"]}
+    assert set(rows) == {("Lidl", "Eieren"), ("Lidl", "Pasta"), ("Jumbo", "Koffie")}   # grasmaaier (laag vertrouwen) eruit
+    assert rows[("Lidl", "Eieren")]["normale_prijs"] == 0.25 and rows[("Lidl", "Eieren")]["prijs"] == 2.19
+    assert rows[("Jumbo", "Koffie")]["advies"] % 2 == 0          # 2e halve prijs -> even aantal
+    assert len(res["nieuw"]) == 3 and len(services.calls) == 2
+    # zichtbaar: pasta staat al op de lijst; negeren werkt
+    z = {r["product"]: r for r in a.zichtbaar()}
+    assert z["Pasta"]["op_lijst"] and not z["Eieren"]["op_lijst"]
+    a.negeer(rows[("Lidl", "Eieren")]["key"])
+    assert "Eieren" not in {r["product"] for r in a.zichtbaar()}
+    # tweede ronde zonder wijzigingen: geen nieuwe AI-aanroepen, niets nieuw
+    res2 = run(a.ververs())
+    assert len(services.calls) == 2 and res2["nieuw"] == []

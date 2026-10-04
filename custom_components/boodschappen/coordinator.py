@@ -41,7 +41,8 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
             old = await self._old_store.async_load() or {}
             data = {"transactions": old}
         for key, default in (("transactions", {}), ("afvink", []), ("mappings", {}), ("queue", []), ("bonnen", []),
-                             ("favorieten", {"vast": [], "verborgen": []})):
+                             ("favorieten", {"vast": [], "verborgen": []}),
+                             ("aanbiedingen", {"resultaat": [], "hash": {}, "genegeerd": [], "gemeld": [], "bijgewerkt": None, "fout": {}})):
             self.state[key] = data.get(key, default)
 
     def save(self) -> None:
