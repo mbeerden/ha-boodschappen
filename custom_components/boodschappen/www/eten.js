@@ -108,6 +108,7 @@ class EtenPanel extends HTMLElement {
     }
     this.busy = false;
     this.bezigTekst = "";
+    this.bezigDag = null;
     this._render();
     return res;
   }
@@ -122,7 +123,8 @@ class EtenPanel extends HTMLElement {
       </header>
       <nav class="tabs" role="tablist"></nav>
       <div class="bar"></div>
-      <div class="main"></div>`;
+      <div class="main"></div>
+      <div class="status" role="status" aria-live="polite"></div>`;
     const menu = document.createElement("ha-menu-button");
     menu.hass = this._hass;
     menu.narrow = this._narrow;
@@ -147,6 +149,11 @@ class EtenPanel extends HTMLElement {
   // ------------------------------------------------------------------ render
   _render() {
     const root = this.shadowRoot;
+    const st = root.querySelector(".status");
+    if (st) {
+      st.classList.toggle("aan", this.busy);
+      st.innerHTML = this.busy ? `<span class="spinner" aria-hidden="true"></span><span>${esc(this.bezigTekst || "Bezig…")}</span>` : "";
+    }
     const main = root.querySelector(".main");
     const tabs = root.querySelector(".tabs");
     const bar = root.querySelector(".bar");
@@ -264,8 +271,16 @@ class EtenPanel extends HTMLElement {
   }
 
   _dagInhoud(ds, p, vs, ex, vandaag) {
+    if (this.busy && this.bezigDag === ds)
+      return `<div class="laadblok" role="status"><span class="spinner" aria-hidden="true"></span><span>${esc(this.bezigTekst || "Bezig…")}</span></div>`;
     if (vs && !vs.vast) return this._voorstelDag(vs);
     if (this.edit === ds) return this._planForm(ds, p, ex[0]);
+    if (p && p.geen) {
+      return `<div class="maaltijd geen">
+          <div class="mtitel"><span class="t">${esc(p.titel || "Geen maaltijd")}</span><small>we koken niet</small></div>
+          <div class="mknoppen"><button class="sec-btn" data-act="plan" data-datum="${ds}">Wijzig</button></div>
+        </div>${ds >= vandaag ? this._suggestie(ds) || this._aanpasBlok(ds, p.id) : ""}`;
+    }
     if (p) {
       const r = p.recept_id ? this.recept(p.recept_id) : null;
       const meta = [p.kookt ? `kookt: ${esc(p.kookt)}` : "", p.porties ? `${fmtNum(p.porties)} porties` : "",
@@ -286,9 +301,14 @@ class EtenPanel extends HTMLElement {
     let html = "";
     for (const e of ex) {
       html += `<div class="extern"><div><span class="t">${esc(e.titel)}</span><small>staat in de agenda</small></div>
-        <button class="sec-btn" data-act="plan" data-datum="${ds}">Koppel recept</button></div>`;
+        <div class="mknoppen">
+          <button class="sec-btn" data-act="geenmaaltijd" data-datum="${ds}" data-uid="${esc(e.uid || "")}">Geen maaltijd</button>
+          <button class="sec-btn" data-act="plan" data-datum="${ds}">Koppel recept</button>
+        </div></div>`;
     }
-    if (!ex.length) html += `<button class="leegdag" data-act="plan" data-datum="${ds}">+ Plan een maaltijd</button>`;
+    if (!ex.length)
+      html += `<div class="leegrij"><button class="leegdag" data-act="plan" data-datum="${ds}">+ Plan een maaltijd</button>
+        <button class="link" data-act="geenmaaltijd" data-datum="${ds}">Geen maaltijd</button></div>`;
     return html;
   }
 
@@ -300,6 +320,17 @@ class EtenPanel extends HTMLElement {
 
   _voorstelDag(vs) {
     const ds = vs.datum;
+    if (vs.geen)
+      return `<div class="vform geen" data-datum="${ds}">
+        <p class="geentitel">Geen maaltijd <small>we koken niet</small></p>
+        ${vs.agenda ? `<p class="reden">In de agenda stond: ${esc(vs.agenda)}</p>` : ""}
+        ${vs.reden ? `<p class="reden">${esc(vs.reden)}</p>` : ""}
+        <div class="rij3">
+          <label class="check"><input type="checkbox" data-vs="geen" checked> Geen maaltijd</label>
+          <label class="check"><input type="checkbox" data-vs="overslaan" ${vs.overslaan ? "checked" : ""}> Niet plannen</label>
+        </div>
+        ${this._aanpasBlok(ds, null, vs.wens)}
+      </div>`;
     return `<div class="vform ${vs.overslaan ? "uit" : ""}" data-datum="${ds}">
       <label class="veld"><span>Gerecht</span>
         <select data-vs="recept_id">${this._receptOpties(vs.recept_id, undefined, vs.concept)}</select></label>
@@ -315,6 +346,7 @@ class EtenPanel extends HTMLElement {
       </div>
       <div class="rij3">
         <label class="check"><input type="checkbox" data-vs="boodschappen" ${vs.boodschappen !== false ? "checked" : ""}> Boodschappen</label>
+        <label class="check"><input type="checkbox" data-vs="geen"> Geen maaltijd</label>
         <label class="check"><input type="checkbox" data-vs="overslaan" ${vs.overslaan ? "checked" : ""}> Niet plannen</label>
       </div>
     </div>`;
@@ -366,7 +398,7 @@ class EtenPanel extends HTMLElement {
   }
 
   _planForm(ds, p, ex) {
-    const titel = p?.titel || ex?.titel || "";
+    const titel = p?.geen ? "" : p?.titel || ex?.titel || "";
     return `<div class="vform" data-plan="${ds}">
       <label class="veld"><span>Gerecht</span>
         <select name="recept_id">${this._receptOpties(p?.recept_id)}</select></label>
@@ -377,6 +409,7 @@ class EtenPanel extends HTMLElement {
         <label class="veld smal"><span>Vriezer</span><input name="vriezer" type="number" min="0" inputmode="numeric" value="${esc(p?.vriezer || 0)}"></label>
       </div>
       <label class="check"><input type="checkbox" name="boodschappen" ${p?.boodschappen !== false ? "checked" : ""}> Ingrediënten op de boodschappenlijst</label>
+      <label class="check"><input type="checkbox" name="geen" ${p?.geen ? "checked" : ""}> Geen maaltijd (we koken niet)</label>
       <div class="knoppen">
         ${p ? `<button class="wis" data-act="planweg" data-id="${p.id}">Verwijderen</button>` : ""}
         <span class="vul"></span>
@@ -695,10 +728,12 @@ class EtenPanel extends HTMLElement {
           return this._render();
         }
         this.aanpas = null;
+        this.bezigDag = b.dataset.datum;
         return this._do({ type: "boodschappen/eten_dag_aanpassen", datum: b.dataset.datum, wens, plan_id: b.dataset.plan || null },
           `Gemini zoekt iets voor ${dagNaam(b.dataset.datum)}…`);
       }
       case "sugtoepassen": {
+        this.bezigDag = b.dataset.datum;
         const res = await this._do({ type: "boodschappen/eten_suggestie_toepassen", datum: b.dataset.datum }, "Agenda en boodschappen bijwerken…");
         if (res && typeof res === "object") {
           this.melding = `Aangepast in de agenda${res.op_lijst ? `, ${res.op_lijst} product(en) op de boodschappenlijst` : ""}.`;
@@ -708,6 +743,14 @@ class EtenPanel extends HTMLElement {
       }
       case "sugweg":
         return this._do({ type: "boodschappen/eten_suggestie_weg", datum: b.dataset.datum });
+      case "geenmaaltijd": {
+        this.bezigDag = b.dataset.datum;
+        const velden = { geen: true, titel: "Geen maaltijd", boodschappen: false };
+        if (b.dataset.uid)
+          return this._do({ type: "boodschappen/eten_overnemen", datum: b.dataset.datum, uid: b.dataset.uid, recept_id: null,
+            titel: "Geen maaltijd", velden }, "In de agenda zetten…");
+        return this._do({ type: "boodschappen/eten_plan", datum: b.dataset.datum, plan_id: null, velden }, "In de agenda zetten…");
+      }
       case "planannuleer":
         this.edit = null;
         return this._render();
@@ -722,12 +765,15 @@ class EtenPanel extends HTMLElement {
           vriezer: Number(val("vriezer").value || 0),
           boodschappen: val("boodschappen").checked,
           lijst: val("boodschappen").checked,
+          geen: val("geen").checked,
         };
+        if (velden.geen) Object.assign(velden, { recept_id: null, titel: "Geen maaltijd", boodschappen: false, lijst: false });
         if (!velden.recept_id && !velden.titel) {
           this.err = "Kies een recept of vul een titel in.";
           return this._render();
         }
         this.edit = null;
+        this.bezigDag = b.dataset.datum;
         if (b.dataset.uid !== undefined && !b.dataset.id)
           return this._do({ type: "boodschappen/eten_overnemen", datum: b.dataset.datum, uid: b.dataset.uid || null,
             recept_id: velden.recept_id, titel: velden.titel, velden }, "Agenda bijwerken…");
@@ -909,7 +955,7 @@ class EtenPanel extends HTMLElement {
 
 const CSS = `
 :host {
-  display: flex; flex-direction: column; height: 100%;
+  display: flex; flex-direction: column; height: 100%; position: relative;
   background: var(--primary-background-color); color: var(--primary-text-color);
   font-family: var(--paper-font-body1_-_font-family, Roboto, system-ui, sans-serif);
   --acc: var(--primary-color);
@@ -994,6 +1040,24 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; flex: 1; }
 .check input { width: 20px; height: 20px; }
 .check.klein { font-size: 13px; min-height: 0; color: var(--secondary-text-color); white-space: nowrap; }
 .check.klein input { width: 18px; height: 18px; }
+
+/* laden */
+.spinner { flex: none; width: 20px; height: 20px; border-radius: 50%; border: 3px solid color-mix(in srgb, var(--acc) 25%, transparent);
+  border-top-color: var(--acc); animation: draai .8s linear infinite; }
+@keyframes draai { to { transform: rotate(360deg); } }
+.laadblok { display: flex; align-items: center; gap: 12px; padding: 18px 4px; color: var(--secondary-text-color); font-size: 15px; }
+.status { position: absolute; left: 50%; bottom: 20px; transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
+  display: flex; align-items: center; gap: 10px; padding: 12px 18px; border-radius: 24px; max-width: calc(100% - 32px);
+  background: var(--card-background-color); color: var(--primary-text-color); box-shadow: 0 4px 16px rgba(0,0,0,.25);
+  font-size: 15px; transition: opacity .15s, transform .15s; }
+.status.aan { opacity: 1; transform: translate(-50%, 0); }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } .status { transition: none; } }
+/* geen maaltijd */
+.maaltijd.geen .t, .geentitel { color: var(--secondary-text-color); font-style: italic; }
+.geentitel { margin: 4px 0; font-size: 17px; }
+.geentitel small { font-style: normal; font-size: 13px; margin-left: 6px; }
+.leegrij { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.leegrij .leegdag { width: auto; }
 
 /* aanpassen met Gemini */
 .ai-btn { justify-self: start; margin-top: 4px; padding: 8px 2px; color: var(--primary-color); font-size: 14px; font-weight: 500; text-align: left; }

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 MARKER = re.compile(r"\beten:([0-9a-f]{8,32})\b")
+GEEN_TITEL = "Geen maaltijd"
 UIT_VRIEZER = re.compile(r"(?i)\buit\s+(de\s+)?vriezer\b")
 SYNC_INTERVAL = 300  # agenda hooguit elke 5 minuten teruglezen
 DAGEN = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
@@ -229,7 +230,7 @@ def weekmenu_prompt(
         "Je plant de avondmaaltijden van een gezin. Maak een voorstel voor de dagen hieronder.\n"
         "Antwoord ALLEEN met een JSON-lijst, precies één object per te plannen dag, in dezelfde volgorde:\n"
         '[{"datum": "YYYY-MM-DD", "dag": "maandag", "recept_id": str|null, "titel": str, "kookt": str, '
-        '"porties": int, "vriezer": int, "boodschappen": bool, "reden": str}]\n'
+        '"porties": int, "vriezer": int, "boodschappen": bool, "geen": bool, "reden": str}]\n'
         "- Neem datum én weekdag over zoals hieronder gegeven. Let goed op de weekdag: de huisregels gaan per weekdag.\n"
         "- Kies bij voorkeur recepten uit de receptenlijst (recept_id + titel = naam). Een nieuw gerecht mag "
         "(recept_id null), maar alleen als het echt iets toevoegt.\n"
@@ -243,6 +244,8 @@ def weekmenu_prompt(
         "'Soep (uit de vriezer)'): houd je daaraan. Kies er een passend recept bij als dat er is, anders neem je "
         "de titel over. Bij 'uit de vriezer', een uitje of als iemand anders kookt: geen recept nodig en "
         "boodschappen=false.\n"
+        "- geen=true als er die dag geen avondmaaltijd thuis is (bijv. de wens zegt dat jullie dan niet koken "
+        "of uit eten gaan); dan geen recept, titel 'Geen maaltijd', boodschappen=false.\n"
         "- kookt: de naam van wie kookt, of leeg als er niet gekookt wordt.\n"
         "- reden: één korte zin waarom.\n\n"
         f"Vandaag: {DAGEN[vandaag.weekday()]} {vandaag.isoformat()}\n"
@@ -266,7 +269,7 @@ def dag_prompt(
     return (
         "Je past één avondmaaltijd aan in het weekmenu van een gezin. Doe één voorstel voor deze dag.\n"
         "Antwoord ALLEEN met één JSON-object:\n"
-        '{"recept_id": str|null, "titel": str, "kookt": str, "porties": int, "vriezer": int, "boodschappen": bool, '
+        '{"recept_id": str|null, "titel": str, "kookt": str, "porties": int, "vriezer": int, "boodschappen": bool, "geen": bool, '
         '"reden": str, "nieuw_recept": null | {"naam": str, "porties": int, "tijd": int, "vega": bool, "tags": [str], '
         '"ingredienten": [{"tekst": str, "product_id": int|null, "aantal": number, "basis": bool}], "stappen": [str]}}\n'
         "- Volg de wens van de gebruiker; die gaat voor.\n"
@@ -279,6 +282,8 @@ def dag_prompt(
         "- Houd rekening met de huisregels (wie kookt en wie eet mee op deze weekdag, dieetwensen) en kies niet "
         "iets wat al elders in deze week staat.\n"
         "- porties = alle porties die gekookt worden (incl. vriezer); vriezer = hoeveel daarvan de vriezer in gaan.\n"
+        "- Zegt de wens dat er niet gekookt wordt of dat jullie uit eten gaan: geen=true, titel 'Geen maaltijd', "
+        "geen recept, boodschappen=false.\n"
         "- reden: één korte zin.\n\n"
         f"Vandaag: {DAGEN[vandaag.weekday()]} {vandaag.isoformat()}\n"
         f"Deze dag: {dag['dag'].upper()} {dag['datum']}\n"
@@ -522,8 +527,13 @@ class Eten:
                 # eten uit de vriezer: titel uit de agenda houden, niets te koken of te kopen
                 x = {**x, "titel": idee or x.get("titel"), "kookt": "", "porties": None, "vriezer": 0, "boodschappen": False}
                 rid = None
+            geen = bool(x.get("geen")) and not vast[iso]
+            if geen:
+                x = {**x, "titel": GEEN_TITEL, "kookt": "", "porties": None, "vriezer": 0, "boodschappen": False}
+                rid = None
             titel = self.s["recepten"][rid]["naam"] if rid else str(x.get("titel") or "").strip()
             dagen_uit.append({
+                "geen": geen,
                 "datum": iso, "recept_id": rid, "titel": titel or "?",
                 "kookt": "" if str(x.get("kookt") or "").strip().lower() in ("niemand", "-", "geen", "n.v.t.") else (x.get("kookt") or ""),
                 "porties": x.get("porties") or None, "vriezer": x.get("vriezer") or 0,
@@ -554,6 +564,12 @@ class Eten:
                         d["recept_id"] = rid if rid in self.s["recepten"] else None
                         if d["recept_id"]:
                             d["titel"] = self.s["recepten"][rid]["naam"]
+                if "geen" in velden and bool(velden["geen"]) != bool(d.get("geen")):
+                    if velden["geen"]:
+                        d["vorige"] = {k: d.get(k) for k in ("recept_id", "titel", "boodschappen")}
+                        d.update({"geen": True, "recept_id": None, "titel": GEEN_TITEL, "boodschappen": False})
+                    else:
+                        d.update({"geen": False, **(d.pop("vorige", None) or {"titel": "?", "boodschappen": True})})
                 for k in ("titel", "kookt", "porties", "vriezer", "boodschappen", "overslaan", "reden", "wens"):
                     if k in velden and not (k == "titel" and d.get("recept_id") and "recept_id" not in velden):
                         d[k] = velden[k]
@@ -600,7 +616,11 @@ class Eten:
         kookt = str(res.get("kookt") or "")
         if kookt.strip().lower() in ("niemand", "-", "geen", "n.v.t."):
             kookt = ""
+        if res.get("geen"):
+            concept, rid, titel, kookt = None, None, GEEN_TITEL, ""
+            res = {**res, "porties": None, "vriezer": 0, "boodschappen": False}
         nieuw = {
+            "geen": bool(res.get("geen")),
             "datum": datum, "recept_id": rid, "titel": titel, "kookt": kookt,
             "porties": res.get("porties") or None, "vriezer": res.get("vriezer") or 0,
             "boodschappen": bool(res.get("boodschappen", True)), "reden": res.get("reden") or "",
@@ -621,7 +641,7 @@ class Eten:
             raise ValueError("Geen suggestie voor deze dag")
         if sug.get("concept"):
             self.s["recepten"][sug["concept"]["id"]] = sug["concept"]
-        item = await self.plan(datum, {k: sug.get(k) for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen")},
+        item = await self.plan(datum, {k: sug.get(k) for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen", "geen")},
                                sug.get("plan_id"), sync=False)
         item["op_lijst"] = False
         self.save()
@@ -647,7 +667,7 @@ class Eten:
             c = d.get("concept")
             if c and d.get("recept_id") == c["id"]:
                 self.s["recepten"][c["id"]] = c  # nieuw recept pas nu in de bibliotheek
-            nieuw.append(await self.plan(d["datum"], {k: d.get(k) for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen")}, sync=False))
+            nieuw.append(await self.plan(d["datum"], {k: d.get(k) for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen", "geen")}, sync=False))
             await self._extern_weg(d.get("vervangt") or [])
         self.s["voorstel"] = None
         self.save()
@@ -665,9 +685,13 @@ class Eten:
             self.s["planning"].append(item)
         oud_recept = item.get("recept_id")
         item["datum"] = datum
-        for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen", "notitie"):
+        for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen", "notitie", "geen"):
             if k in velden:
                 item[k] = velden[k]
+        if item.get("geen"):
+            # we koken niet: alleen een markering in de agenda, niets te kopen
+            item.update({"recept_id": None, "titel": GEEN_TITEL, "kookt": "", "porties": None,
+                         "vriezer": 0, "boodschappen": False})
         if item.get("recept_id") and item["recept_id"] in self.s["recepten"]:
             item["titel"] = self.s["recepten"][item["recept_id"]]["naam"]
         else:

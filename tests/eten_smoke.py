@@ -112,6 +112,8 @@ async def main():
         if "dag aanpassen" in call.data["task_name"]:
             dag = re.search(r"Deze dag: ([A-Z]+) (\S+)", instr)
             assert dag, "dag ontbreekt in prompt"
+            if "Wens: we gaan uit eten" in instr:
+                return {"data": json.dumps({"recept_id": None, "titel": "Geen maaltijd", "geen": True, "kookt": "", "reden": "uit eten"})}
             if "goulash" in instr:
                 return {"data": json.dumps({"recept_id": None, "titel": "Vega goulash", "kookt": "Papa", "porties": 5,
                     "vriezer": 0, "boodschappen": True, "reden": "wens", "nieuw_recept": {
@@ -321,6 +323,35 @@ async def main():
     await e.suggestie_toepassen(dag12)
     check(sug3 in e.s["recepten"] and p12["titel"] == "Vega goulash", "toegepast concept in bibliotheek")
     await e.plan_verwijderen(p12["id"])
+
+    # --- geen maaltijd ---
+    dag16 = (VANDAAG + timedelta(days=16)).isoformat()
+    STATE["log"].clear()
+    g = await e.plan(dag16, {"geen": True, "titel": "Geen maaltijd", "lijst": True})
+    check(g["geen"] and g["titel"] == "Geen maaltijd" and not g["recept_id"] and g["boodschappen"] is False and g["uid"],
+          "geen maaltijd gepland en in agenda")
+    check(not [l for l in STATE["log"] if l[0] == "add"], "geen maaltijd: niets op de lijst")
+    g = await e.plan(dag16, {"geen": False, "recept_id": rid, "boodschappen": True}, g["id"])
+    check(not g["geen"] and g["recept_id"] == rid, "geen maaltijd weer omgezet naar recept")
+    await e.plan_verwijderen(g["id"])
+    # AI zegt geen maaltijd in een voorstel, en via wijzig
+    await e.voorstel_maken(dag16, 1, "")
+    oud = e.s["voorstel"]["dagen"][0]["titel"]
+    e.voorstel_wijzig(dag16, {"geen": True})
+    e.voorstel_wijzig(dag16, {"geen": False})
+    check(e.s["voorstel"]["dagen"][0]["titel"] == oud and not e.s["voorstel"]["dagen"][0]["geen"], "geen maaltijd terugdraaien herstelt gerecht")
+    e.voorstel_wijzig(dag16, {"geen": True})
+    vg = e.s["voorstel"]["dagen"][0]
+    check(vg["geen"] and vg["boodschappen"] is False, "voorstel-dag op geen maaltijd gezet")
+    res = await e.voorstel_goedkeuren()
+    pg = next(p for p in e.s["planning"] if p["datum"] == dag16)
+    print("   pg", {k: pg.get(k) for k in ("geen", "titel", "recept_id", "boodschappen")}, res)
+    check(pg["geen"] and pg["titel"] == "Geen maaltijd" and res["op_lijst"] == 0, "goedgekeurd als geen maaltijd")
+    await e.dag_aanpassen(dag16, "we gaan uit eten", pg["id"])
+    sg = e.s["suggesties"][dag16]
+    check(sg["geen"] and sg["titel"] == "Geen maaltijd" and not sg["recept_id"], "AI-suggestie: geen maaltijd")
+    e.suggestie_weg(dag16)
+    await e.plan_verwijderen(pg["id"])
 
     await e.plan_verwijderen(pid)
     await e.sync(forceer=True)

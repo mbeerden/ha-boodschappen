@@ -15,6 +15,7 @@ Een eenvoudige boodschappenlijst per winkel bovenop [Grocy](https://grocy.info),
   - *Recepten* toevoegen via een link (schema.org-recept of paginatekst), geplakte tekst of zelf invullen; de AI-taak zet het om en koppelt de ingrediënten aan je Grocy-producten.
   - *Weekmenu*: de AI-taak doet een voorstel op basis van je huisregels, de recepten, wat recent gegeten is en de beoordelingen per persoon. Na goedkeuren komen de maaltijden in een agenda naar keuze (bijv. een gedeelde Google-agenda) en de ontbrekende ingrediënten op de boodschappenlijst van de juiste winkel.
   - *Aanpassen met de AI*: per dag (in het voorstel of al gepland) een wens opgeven, bijv. "een ovenschotel". De AI kiest een passend recept of schrijft een nieuw recept, dat pas in je bibliotheek komt als je het voorstel goedkeurt of de suggestie toepast.
+  - *Geen maaltijd*: markeer een dag waarop jullie niet koken; komt zo in de agenda, zonder boodschappen.
   - De agenda blijft bruikbaar op je telefoon: verschuif of verwijder je daar een maaltijd, dan neemt de planning dat over. Events zonder kenmerk (zelf ingevoerd) zie je ook en kun je aan een recept koppelen.
   - *Koken*: stap-voor-stap weergave voor een tablet in de keuken (scherm blijft aan), porties schalen.
   - *Beoordelen*: per persoon een score na de maaltijd; telt mee in volgende voorstellen.
