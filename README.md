@@ -55,6 +55,16 @@ data:
       totaal: 3.78
 ```
 
+## Op een dashboard
+
+Voeg de resource `/boodschappen_static/card.js` (type *JavaScript module*) toe; daarna zijn er twee kaarten,
+handig voor een wandtablet (bijv. in een weergave van het type *paneel*):
+
+```yaml
+type: custom:eten-card          # of custom:boodschappen-card
+show_header: false              # standaard; true toont de titelbalk
+```
+
 ## Eten instellen
 
 Open *Eten → ⚙* en kies de agenda, het tijdstip van de maaltijd, de personen die beoordelen en je huisregels
