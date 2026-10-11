@@ -271,6 +271,22 @@ class BonVerwerker:
         await self.c.async_refresh()
         return await self.koppel(qid, pid, factor, True)
 
+    async def herkoppel_nieuw(self, bon_id: str, line_id: str, naam: str, group_id: int | None, factor: float = 1.0,
+                              totaal: float | None = None) -> dict | None:
+        """Een verwerkte bonregel koppelen aan een nieuw Grocy-product (verkeerd herkend product)."""
+        bon, line = self._bon_line(bon_id, line_id)
+        if line is None:
+            raise ValueError("Bonregel niet gevonden")
+        if not (naam or "").strip():
+            raise ValueError("Geef het nieuwe product een naam")
+        loc_id, _ = self._winkel_ids(bon["winkel"])
+        products = self.c.data.products
+        template = next((p for p in products.values() if group_id and p.get("product_group_id") and int(p["product_group_id"]) == int(group_id)), None)
+        template = template or next(iter(products.values()), {})
+        pid = await self.c.api.create_product(naam.strip(), group_id, loc_id, template)
+        await self.c.async_refresh()
+        return await self.herkoppel(bon_id, line_id, pid, factor, False, totaal)
+
     async def herkoppel(self, bon_id: str, line_id: str, product_id: int | None, factor: float = 1.0, negeren: bool = False,
                         totaal: float | None = None) -> dict | None:
         """Een al verwerkte bonregel corrigeren (andere koppeling, ander aantal per verpakking, ander bedrag, of negeren)."""

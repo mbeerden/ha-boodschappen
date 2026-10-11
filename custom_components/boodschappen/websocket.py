@@ -143,6 +143,10 @@ async def _bon_nieuw(c, msg):
 
 
 async def _bon_herkoppel(c, msg):
+    if msg.get("nieuw_naam"):
+        await c.bon.herkoppel_nieuw(msg["bon_id"], msg["line_id"], msg["nieuw_naam"], msg.get("group_id"),
+                                    float(msg.get("factor") or 1), msg.get("totaal"))
+        return
     await c.bon.herkoppel(msg["bon_id"], msg["line_id"], msg.get("product_id"), float(msg.get("factor") or 1), bool(msg.get("negeren", False)),
                           msg.get("totaal"))
 
@@ -168,7 +172,8 @@ COMMANDS = [
       vol.Optional("group_id"): vol.Any(int, None), vol.Optional("factor"): vol.Coerce(float)}, _bon_nieuw),
     ({vol.Required("type"): "boodschappen/bon_herkoppel", vol.Required("bon_id"): str, vol.Required("line_id"): str,
       vol.Optional("product_id"): vol.Any(int, None), vol.Optional("factor"): vol.Coerce(float), vol.Optional("negeren"): bool,
-      vol.Optional("totaal"): vol.Any(None, vol.Coerce(float))}, _bon_herkoppel),
+      vol.Optional("totaal"): vol.Any(None, vol.Coerce(float)), vol.Optional("nieuw_naam"): vol.Any(None, str),
+      vol.Optional("group_id"): vol.Any(None, int)}, _bon_herkoppel),
 ]
 
 

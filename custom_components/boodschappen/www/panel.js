@@ -376,7 +376,7 @@ class BoodschappenPanel extends HTMLElement {
         <span class="doel">${doel}</span>
         ${r.status !== "te koppelen" ? `<button class="link" data-act="herkoppel" data-bon="${b.id}" data-line="${r.id}">${editing ? "Annuleren" : "Wijzigen"}</button>` : ""}
       </div>
-      ${editing ? this._kiezer({ key: `e:${b.id}:${r.id}`, suggestie: r.grocy_naam || r.tekst, factor: r.factor || 1, mode: "herkoppel", bon: b.id, line: r.id }) : ""}
+      ${editing ? this._kiezer({ key: `e:${b.id}:${r.id}`, suggestie: r.grocy_naam || r.tekst, factor: r.factor || 1, mode: "herkoppel", bon: b.id, line: r.id, totaal: r.totaal }) : ""}
     </li>`;
   }
 
@@ -405,8 +405,12 @@ class BoodschappenPanel extends HTMLElement {
         <input class="factor" type="number" min="0.01" step="any" inputmode="decimal" value="${fmtNum(o.factor)}">
       </label>
       <p class="hint">Bijv. 6 als één regel op de bon een doosje van 6 eieren is.</p>
+      ${o.mode === "herkoppel" ? `<label class="veld klein">Bedrag op de bon (€)
+        <input class="btotaal" type="number" step="0.01" inputmode="decimal" value="${o.totaal ?? ""}" data-oud="${o.totaal ?? ""}">
+      </label>
+      <p class="hint">Alleen aanpassen als het bedrag verkeerd is uitgelezen (bijv. een actiekorting). Kies daarna het product, of tik op het huidige product om alleen het bedrag te corrigeren.</p>` : ""}
       <div class="knoppen">
-        ${o.mode === "queue" ? `<button class="sec-btn" data-act="nieuw">Nieuw product…</button>` : ""}
+        <button class="sec-btn" data-act="nieuw">Nieuw product…</button>
         <button class="sec-btn" data-act="negeer">Negeren</button>
       </div>
       <div class="nieuwform" hidden>
@@ -415,6 +419,12 @@ class BoodschappenPanel extends HTMLElement {
         <button class="primary" data-act="maak">Product aanmaken en koppelen</button>
       </div>
     </div>`;
+  }
+
+  _totaal(k) {
+    const t = k.querySelector(".btotaal");
+    if (!t || t.value === "" || t.value === t.dataset.oud) return null;
+    return Number(String(t.value).replace(",", "."));
   }
 
   // ---------------------------------------------------------------- events
@@ -552,7 +562,8 @@ class BoodschappenPanel extends HTMLElement {
       if (mode === "queue") await this._do({ type: "boodschappen/bon_koppel", queue_id: k.dataset.qid, product_id: pid, factor });
       else {
         this.edit = null;
-        await this._do({ type: "boodschappen/bon_herkoppel", bon_id: k.dataset.bon, line_id: k.dataset.line, product_id: pid, factor });
+        await this._do({ type: "boodschappen/bon_herkoppel", bon_id: k.dataset.bon, line_id: k.dataset.line, product_id: pid, factor,
+          totaal: this._totaal(k) });
       }
       return;
     }
@@ -567,6 +578,11 @@ class BoodschappenPanel extends HTMLElement {
     if (act === "maak") {
       const naam = k.querySelector(".nnaam").value.trim();
       if (!naam) return k.querySelector(".nnaam").focus();
+      if (mode === "herkoppel") {
+        this.edit = null;
+        return this._do({ type: "boodschappen/bon_herkoppel", bon_id: k.dataset.bon, line_id: k.dataset.line, nieuw_naam: naam,
+          group_id: Number(k.querySelector(".ngroep").value) || null, factor, totaal: this._totaal(k) });
+      }
       await this._do({
         type: "boodschappen/bon_nieuw_product",
         queue_id: k.dataset.qid,

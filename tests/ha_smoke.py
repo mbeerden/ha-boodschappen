@@ -213,6 +213,10 @@ async def main():
     STATE["log"].clear()
     await c.bon.herkoppel(bon["id"], kk["id"], None, 1, False, 1.58)
     print("CORRECTIE", kk["totaal"], kk["prijs_per_eenheid"], bon["totaal"], [l[0] for l in STATE["log"]])
+    # verkeerd herkend product: koppelen aan een nieuw product
+    STATE["log"].clear()
+    await c.bon.herkoppel_nieuw(bon["id"], kk["id"], "Snackkomkommer", 2, 1, None)
+    print("NIEUW", kk["grocy_naam"], kk["product_id"], [l[0] for l in STATE["log"]])
     notes = [s.attributes.get("title") for s in hass.states.async_all("persistent_notification")]
     print("NOTIF", hass.states.async_entity_ids("persistent_notification")[:3], notes[:2])
     print("GROCY-LOG:")
