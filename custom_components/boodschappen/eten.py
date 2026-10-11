@@ -31,7 +31,8 @@ _LOGGER = logging.getLogger(__name__)
 MARKER = re.compile(r"\beten:([0-9a-f]{8,32})\b")
 GEEN_TITEL = "Geen maaltijd"
 UIT_VRIEZER = re.compile(r"(?i)\buit\s+(de\s+)?vriezer\b")
-SYNC_INTERVAL = 300  # agenda hooguit elke 5 minuten teruglezen
+SYNC_INTERVAL = 60  # agenda hooguit elke minuut teruglezen (leest de lokale kopie van de agenda)
+VERWIJDER_NA = 600  # een maaltijd die 10 minuten uit de agenda weg is, is echt verwijderd
 DAGEN = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
 
 DEFAULT_INSTELLINGEN: dict[str, Any] = {
@@ -708,6 +709,7 @@ class Eten:
         if not item.get("uid"):
             # losse agenda-events op die dag (eerder handmatig gezet) vervangen, geen dubbele maaltijd
             await self._extern_weg([e["uid"] for e in self.extern if e["datum"] == datum and e.get("uid")])
+        item.pop("mist_sinds", None)
         await self._event_schrijven(item)
         self.save()
         if sync and velden.get("lijst"):
@@ -922,6 +924,8 @@ class Eten:
             if item["id"] in per_id:
                 e, d = per_id[item["id"]]
                 item["uid"] = e.uid
+                if item.pop("mist_sinds", None):
+                    gewijzigd = True
                 if d != item["datum"]:
                     andere = next((p for p in self.s["planning"] if p["datum"] == d and p["id"] != item["id"]), None)
                     if andere is None:
@@ -931,9 +935,14 @@ class Eten:
                     item["titel"] = e.summary
                     gewijzigd = True
             elif item.get("uid"):
-                # stond in de agenda maar is daar verwijderd
-                self.s["planning"].remove(item)
-                gewijzigd = True
+                # Stond in de agenda maar is er nu niet: pas verwijderen als het een tijd lang zo blijft
+                # (de agenda kan net na het opstarten nog half geladen zijn).
+                if not item.get("mist_sinds"):
+                    item["mist_sinds"] = time.time()
+                    gewijzigd = True
+                elif time.time() - item["mist_sinds"] >= VERWIJDER_NA:
+                    self.s["planning"].remove(item)
+                    gewijzigd = True
         if gewijzigd:
             self.save()
 

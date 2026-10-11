@@ -228,17 +228,22 @@ async def main():
     echte = ent.async_get_events
 
     async def leeg(*a, **k):
-        return []
+        return [x for x in await echte(*a, **k) if "eten:" not in (x.description or "")][:1] or []
 
     ent.async_get_events = leeg
     await e.sync(forceer=True)
     ent.async_get_events = echte
+    await e.sync(forceer=True)
+    check(not any(p.get("mist_sinds") for p in e.s["planning"]), "na volledige respons weer in orde")
     check(len(e.s["planning"]) == voor and all(p.get("uid") for p in e.s["planning"] if not p.get("historie")),
-          "lege agenda-respons verwijdert niets")
+          "lege/halve agenda-respons verwijdert niets")
 
     # in de agenda verwijderen
     tweede = sorted(e.s["planning"], key=lambda p: p["datum"])[0]
     await ent.async_delete_event(tweede["uid"])
+    await e.sync(forceer=True)
+    check(any(p["id"] == tweede["id"] for p in e.s["planning"]) and tweede.get("mist_sinds"), "eerste keer weg: nog niet verwijderd")
+    tweede["mist_sinds"] -= 601
     await e.sync(forceer=True)
     check(all(p["id"] != tweede["id"] for p in e.s["planning"]), "verwijdering in agenda overgenomen")
 
