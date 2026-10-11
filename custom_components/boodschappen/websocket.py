@@ -170,6 +170,139 @@ COMMANDS = [
 ]
 
 
+# ---------------------------------------------------------------- Eten
+def eten_payload(c) -> dict[str, Any]:
+    d = c.data
+    out = c.eten.payload()
+    out["producten"] = sorted(
+        [{"id": pid, "name": p["name"]} for pid, p in d.products.items() if str(p.get("active", 1)) != "0"],
+        key=lambda x: x["name"].lower(),
+    )
+    return out
+
+
+def _eten(fn, sync: bool = False):
+    @websocket_api.async_response
+    async def wrapper(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+        c = _coordinator(hass)
+        if c is None or not hasattr(c, "eten"):
+            connection.send_error(msg["id"], "not_ready", "Boodschappen is niet geladen")
+            return
+        try:
+            extra = await fn(c.eten, msg)
+            if sync:
+                await c.eten.sync()
+        except (GrocyError, ValueError) as err:
+            connection.send_error(msg["id"], "failed", str(err))
+            return
+        except Exception as err:  # noqa: BLE001 - AI/agenda/netwerk: melden i.p.v. hangen
+            connection.send_error(msg["id"], "failed", f"{type(err).__name__}: {err}")
+            return
+        result = eten_payload(c)
+        if extra is not None:
+            result["resultaat"] = extra
+        connection.send_result(msg["id"], result)
+
+    return wrapper
+
+
+async def _e_data(e, msg):
+    return None
+
+
+async def _e_recept(e, msg):
+    return e.recept_opslaan(msg["recept"])
+
+
+async def _e_recept_weg(e, msg):
+    e.recept_verwijderen(msg["recept_id"])
+
+
+async def _e_import(e, msg):
+    return await e.recept_importeren(msg.get("url"), msg.get("tekst"))
+
+
+async def _e_koppel(e, msg):
+    await e.recept_koppelen(msg["recept_id"])
+
+
+async def _e_voorstel(e, msg):
+    await e.voorstel_maken(msg["start"], int(msg.get("dagen") or 7), msg.get("wens") or "")
+
+
+async def _e_voorstel_wijzig(e, msg):
+    e.voorstel_wijzig(msg["datum"], msg["velden"])
+
+
+async def _e_voorstel_weg(e, msg):
+    e.voorstel_weg()
+
+
+async def _e_goedkeuren(e, msg):
+    return await e.voorstel_goedkeuren()
+
+
+async def _e_plan(e, msg):
+    item = await e.plan(msg["datum"], msg.get("velden") or {}, msg.get("plan_id"))
+    return item["id"]
+
+
+async def _e_plan_weg(e, msg):
+    await e.plan_verwijderen(msg["plan_id"])
+
+
+async def _e_overnemen(e, msg):
+    item = await e.overnemen(msg["datum"], msg.get("uid"), msg.get("recept_id"), msg.get("titel"))
+    return item["id"]
+
+
+async def _e_lijst(e, msg):
+    for p in e.s["planning"]:
+        if p["id"] in msg["plan_ids"]:
+            p["op_lijst"] = False
+    return await e.ingredienten_op_lijst(msg["plan_ids"])
+
+
+async def _e_beoordeel(e, msg):
+    e.beoordeel(msg["plan_id"], msg["persoon"], msg.get("score"), msg.get("opmerking") or "")
+
+
+async def _e_instellingen(e, msg):
+    e.instellingen_opslaan(msg["instellingen"])
+    await e.sync(forceer=True)
+
+
+async def _e_sync(e, msg):
+    await e.sync(forceer=True)
+
+
+ETEN_COMMANDS = [
+    ({vol.Required("type"): "boodschappen/eten"}, _e_data, True),
+    ({vol.Required("type"): "boodschappen/eten_sync"}, _e_sync, False),
+    ({vol.Required("type"): "boodschappen/eten_recept", vol.Required("recept"): dict}, _e_recept, False),
+    ({vol.Required("type"): "boodschappen/eten_recept_weg", vol.Required("recept_id"): str}, _e_recept_weg, False),
+    ({vol.Required("type"): "boodschappen/eten_import", vol.Optional("url"): vol.Any(None, str),
+      vol.Optional("tekst"): vol.Any(None, str)}, _e_import, False),
+    ({vol.Required("type"): "boodschappen/eten_koppel", vol.Required("recept_id"): str}, _e_koppel, False),
+    ({vol.Required("type"): "boodschappen/eten_voorstel", vol.Required("start"): str, vol.Optional("dagen"): int,
+      vol.Optional("wens"): vol.Any(None, str)}, _e_voorstel, False),
+    ({vol.Required("type"): "boodschappen/eten_voorstel_wijzig", vol.Required("datum"): str,
+      vol.Required("velden"): dict}, _e_voorstel_wijzig, False),
+    ({vol.Required("type"): "boodschappen/eten_voorstel_weg"}, _e_voorstel_weg, False),
+    ({vol.Required("type"): "boodschappen/eten_goedkeuren"}, _e_goedkeuren, False),
+    ({vol.Required("type"): "boodschappen/eten_plan", vol.Required("datum"): str, vol.Optional("plan_id"): vol.Any(None, str),
+      vol.Optional("velden"): dict}, _e_plan, False),
+    ({vol.Required("type"): "boodschappen/eten_plan_weg", vol.Required("plan_id"): str}, _e_plan_weg, False),
+    ({vol.Required("type"): "boodschappen/eten_overnemen", vol.Required("datum"): str, vol.Optional("uid"): vol.Any(None, str),
+      vol.Optional("recept_id"): vol.Any(None, str), vol.Optional("titel"): vol.Any(None, str)}, _e_overnemen, False),
+    ({vol.Required("type"): "boodschappen/eten_op_lijst", vol.Required("plan_ids"): [str]}, _e_lijst, False),
+    ({vol.Required("type"): "boodschappen/eten_beoordeel", vol.Required("plan_id"): str, vol.Required("persoon"): str,
+      vol.Optional("score"): vol.Any(None, vol.All(int, vol.Range(min=1, max=5))),
+      vol.Optional("opmerking"): vol.Any(None, str)}, _e_beoordeel, False),
+    ({vol.Required("type"): "boodschappen/eten_instellingen", vol.Required("instellingen"): dict}, _e_instellingen, False),
+]
+
+
 def async_register(hass: HomeAssistant) -> None:
     if hass.data.get(f"{DOMAIN}_ws"):
         return
@@ -177,3 +310,5 @@ def async_register(hass: HomeAssistant) -> None:
     for schema, fn in COMMANDS:
         handler = _handler(fn)
         websocket_api.async_register_command(hass, websocket_api.websocket_command(schema)(handler))
+    for schema, fn, sync in ETEN_COMMANDS:
+        websocket_api.async_register_command(hass, websocket_api.websocket_command(schema)(_eten(fn, sync)))

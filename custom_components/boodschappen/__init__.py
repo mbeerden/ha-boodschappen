@@ -1,7 +1,7 @@
 """Boodschappen: eenvoudige winkellijsten per winkel bovenop Grocy, met bonnetjesverwerking."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 import logging
 from pathlib import Path
 
@@ -15,12 +15,13 @@ from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, Supp
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_call_later, async_track_time_change
+from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
 
 from . import websocket
 from .api import GrocyApi, GrocyError, build_base_url
 from .aanbiedingen import Aanbiedingen
 from .bon import BonVerwerker
+from .eten import Eten
 from .const import (
     CONF_API_KEY,
     CONF_PORT,
@@ -38,8 +39,9 @@ PLATFORMS = [Platform.TODO]
 SERVICE_BON = "bon_verwerken"
 SERVICE_AANBIEDINGEN = "aanbiedingen_verversen"
 PANEL_URL = "boodschappen"
+ETEN_URL = "eten"
 STATIC_URL = "/boodschappen_static"
-VERSION = "0.4.5"
+VERSION = "0.5.0"
 
 BON_SCHEMA = vol.Schema(
     {
@@ -79,6 +81,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
     coordinator.bon = BonVerwerker(coordinator)
     coordinator.aanbiedingen = Aanbiedingen(coordinator)
+    coordinator.eten = Eten(coordinator, entry.entry_id)
+    await coordinator.eten.async_load()
     entry.runtime_data = coordinator
 
     async def _dagelijks(_now=None) -> None:
@@ -87,6 +91,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # elke ochtend om 07:05 (Lidl-week start maandag, Jumbo woensdag); en kort na het opstarten als het lang geleden is
     entry.async_on_unload(async_track_time_change(hass, _dagelijks, hour=7, minute=5, second=0))
     entry.async_on_unload(async_call_later(hass, 120, _opstart_check(hass, coordinator)))
+
+    async def _agenda_sync(_now=None) -> None:
+        try:
+            await coordinator.eten.sync(forceer=True)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Eet-agenda synchroniseren mislukt: %s", err)
+
+    entry.async_on_unload(async_track_time_interval(hass, _agenda_sync, timedelta(minutes=30)))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _register_services(hass)
@@ -99,6 +111,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if ok and hass.data.pop(f"{DOMAIN}_panel", False):
         frontend.async_remove_panel(hass, PANEL_URL)
+        frontend.async_remove_panel(hass, ETEN_URL)
     return ok
 
 
@@ -117,6 +130,16 @@ async def _register_panel(hass: HomeAssistant) -> None:
         sidebar_title="Boodschappen",
         sidebar_icon="mdi:cart-variant",
         module_url=f"{STATIC_URL}/panel.js?v={VERSION}",
+        require_admin=False,
+        config={},
+    )
+    await panel_custom.async_register_panel(
+        hass,
+        frontend_url_path=ETEN_URL,
+        webcomponent_name="eten-panel",
+        sidebar_title="Eten",
+        sidebar_icon="mdi:silverware-fork-knife",
+        module_url=f"{STATIC_URL}/eten.js?v={VERSION}",
         require_admin=False,
         config={},
     )

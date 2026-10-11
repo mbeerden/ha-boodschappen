@@ -1,0 +1,218 @@
+"""Start een echte HA-core met de integratie, een Local Calendar als eet-agenda en een nep-AI-taak.
+
+Draaien: python3 tests/eten_smoke.py
+"""
+import asyncio
+from datetime import date, datetime, timedelta
+import json
+import re
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+from aiohttp import web
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tests"))
+sys.path.insert(0, str(ROOT))
+from ha_smoke import STATE, fake_grocy  # noqa: E402
+
+VANDAAG = date.today()
+FOUTEN: list[str] = []
+
+
+def check(ok, wat):
+    print(("OK   " if ok else "FOUT ") + wat)
+    if not ok:
+        FOUTEN.append(wat)
+
+
+async def main():
+    app = fake_grocy()
+
+    async def stock(req):
+        return web.json_response([{"product_id": 15, "amount": 1}])  # 1 ui in huis
+
+    app.router.add_get("/api/stock", stock)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", 9192).start()
+
+    cfg = Path(tempfile.mkdtemp())
+    shutil.copytree(ROOT / "custom_components", cfg / "custom_components")
+
+    import aiohttp
+    from homeassistant import auth as ha_auth, bootstrap, config_entries, loader
+    from homeassistant.core import HomeAssistant, SupportsResponse
+    from homeassistant.helpers import aiohttp_client as _ac
+    from homeassistant.setup import async_setup_component
+
+    class _R(aiohttp.ThreadedResolver):
+        async def real_close(self):
+            pass
+
+    _ac._async_make_resolver = lambda hass: _R()
+    hass = HomeAssistant(str(cfg))
+    hass.config.skip_pip = True
+    from homeassistant.util import dt as dt_util0
+    hass.config.time_zone = "Europe/Amsterdam"
+    dt_util0.set_default_time_zone(dt_util0.get_time_zone("Europe/Amsterdam"))
+    loader.async_setup(hass)
+    hass.config_entries = config_entries.ConfigEntries(hass, {})
+    await bootstrap.async_load_base_functionality(hass)
+    hass.auth = await ha_auth.auth_manager_from_config(hass, [{"type": "homeassistant"}], [])
+    await async_setup_component(hass, "http", {"http": {"server_port": 18124}})
+    await async_setup_component(hass, "homeassistant", {})
+
+    # eet-agenda: Local Calendar
+    r = await hass.config_entries.flow.async_init("local_calendar", context={"source": "user"})
+    r = await hass.config_entries.flow.async_configure(r["flow_id"], {"calendar_name": "Eet Planning"})
+    await hass.async_block_till_done()
+    check(hass.states.get("calendar.eet_planning") is not None, "agenda calendar.eet_planning bestaat")
+
+    # een los event (zoals eerder handmatig ingevoerd)
+    morgen = VANDAAG + timedelta(days=1)
+    await hass.services.async_call("calendar", "create_event", {
+        "summary": "Nasi (opa en oma)", "start_date_time": f"{morgen.isoformat()} 17:00:00",
+        "end_date_time": f"{morgen.isoformat()} 18:00:00"}, target={"entity_id": "calendar.eet_planning"}, blocking=True)
+
+    # nep-AI-taak
+    vragen = []
+
+    async def ai(call):
+        vragen.append(call.data["task_name"])
+        instr = call.data["instructions"]
+        if "weekmenu" in call.data["task_name"]:
+            dagen = json.loads(re.search(r"Te plannen dagen: (\[.*?\])\n", instr).group(1))
+            recepten = json.loads(re.search(r"Recepten: (\[.*\])$", instr, re.S).group(1))
+            uit = []
+            recepten.sort(key=lambda r: r["naam"] != "Linzensoep")
+            for n, d in enumerate([d for d in dagen if not d.get("vast")] and dagen):
+                if d.get("vast"):
+                    uit.append({"datum": d["datum"], "titel": d["vast"], "kookt": "opa", "boodschappen": False})
+                else:
+                    rec = recepten[sum(1 for x in uit if x.get("recept_id")) % len(recepten)]
+                    uit.append({"datum": d["datum"], "recept_id": rec["id"], "titel": rec["naam"], "kookt": "Papa",
+                                "porties": 8, "vriezer": 4, "boodschappen": True, "reden": "lekker"})
+            return {"data": json.dumps(uit)}
+        return {"data": "```json\n" + json.dumps({
+            "naam": "Linzensoep", "porties": 4, "tijd": 35, "vega": True, "tags": ["soep"],
+            "ingredienten": [{"tekst": "2 uien", "product_id": 15, "aantal": 2},
+                             {"tekst": "zout", "product_id": None, "aantal": 1, "basis": True},
+                             {"tekst": "2 paprika", "product_id": 7, "aantal": 2}],
+            "stappen": ["Fruit de ui", "Kook alles 20 minuten"]}) + "\n```"}
+
+    hass.services.async_register("ai_task", "generate_data", ai, supports_response=SupportsResponse.ONLY)
+    hass.states.async_set("ai_task.nep", "unknown")
+
+    grocy_entry = config_entries.ConfigEntry(
+        domain="grocy", title="Grocy", data={"url": "http://127.0.0.1", "port": 9192, "api_key": "geheim", "verify_ssl": False},
+        source="user", version=1, minor_version=1, options={}, unique_id=None, discovery_keys={}, subentries_data=None,
+    )
+    hass.config_entries._entries[grocy_entry.entry_id] = grocy_entry
+    await hass.config_entries.flow.async_init("boodschappen", context={"source": "user"})
+    await hass.async_block_till_done()
+
+    from homeassistant.components import frontend
+    from custom_components.boodschappen import websocket as ws
+
+    check("eten" in hass.data.get(frontend.DATA_PANELS, {}), "paneel /eten geregistreerd")
+    c = ws._coordinator(hass)
+    e = c.eten
+    check(e.inst["agenda"] == "calendar.eet_planning", "agenda automatisch gekozen")
+    e.instellingen_opslaan({"personen": "A, B, C", "huisregels": "Zondag dubbel koken"})
+    check(e.inst["personen"] == ["A", "B", "C"], "personen opgeslagen")
+
+    # recept importeren uit tekst + handmatig recept
+    rid = await e.recept_importeren(None, "Linzensoep met ui en paprika ...")
+    r = e.s["recepten"][rid]
+    check(r["naam"] == "Linzensoep" and len(r["ingredienten"]) == 3 and r["ingredienten"][1]["basis"], "recept via AI omgezet")
+    rid2 = e.recept_opslaan({"naam": "Wraps", "porties": 4, "ingredienten": [{"tekst": "wraps", "product_id": 1, "aantal": 1}],
+                             "stappen": ["Vullen"]})
+
+    # agenda teruglezen: los event zichtbaar
+    await e.sync(forceer=True)
+    check([x["titel"] for x in e.extern] == ["Nasi (opa en oma)"], "los agenda-event zichtbaar als extern")
+
+    # weekmenu voorstellen voor 3 dagen vanaf morgen
+    await e.voorstel_maken(morgen.isoformat(), 3, "iets met soep")
+    v = e.s["voorstel"]
+    check(len(v["dagen"]) == 3 and v["dagen"][0]["vast"] and not v["dagen"][0]["boodschappen"], "vaste dag blijft vast")
+    e.voorstel_wijzig(v["dagen"][2]["datum"], {"recept_id": rid2, "porties": 4})
+    check(e.s["voorstel"]["dagen"][2]["titel"] == "Wraps", "dag in voorstel gewijzigd")
+    STATE["log"].clear()
+    res = await e.voorstel_goedkeuren()
+    check(res["gepland"] == 2, f"2 dagen gepland ({res})")
+    adds = [l[1] for l in STATE["log"] if l[0] == "add"]
+    print("   op lijst:", [(a.get("product_id"), a.get("amount"), a.get("note")) for a in adds])
+    # Linzensoep 8 porties = 2x: uien 4 (1 in huis -> 3), paprika 4; wraps 1
+    per = {a["product_id"]: a["amount"] for a in adds}
+    check(per.get(15) == 3 and per.get(7) == 4 and per.get(1) == 1, "ingrediënten geschaald, voorraad afgetrokken")
+
+    # events in de agenda met kenmerk
+    tz = hass.config.time_zone
+    from homeassistant.util import dt as dt_util
+    start = dt_util.start_of_local_day(datetime.combine(VANDAAG, datetime.min.time()))
+    events = await hass.services.async_call("calendar", "get_events", {"start_date_time": start.isoformat(), "duration": {"days": 7}},
+                                            target={"entity_id": "calendar.eet_planning"}, blocking=True, return_response=True)
+    evs = events["calendar.eet_planning"]["events"]
+    print("   agenda:", [(x["start"], x["summary"]) for x in evs])
+    eigen = [x for x in evs if "eten:" in (x.get("description") or "")]
+    check(len(eigen) == 2 and all("17:00" in x["start"] for x in eigen), "2 events om 17:00 met kenmerk")
+    check(all(p.get("uid") for p in e.s["planning"]), "uid van events opgeslagen")
+    check("Porties: 8 (4 naar de vriezer)" in eigen[0]["description"], "beschrijving met porties/vriezer")
+
+    # in de agenda verschuiven: event van dag 2 naar dag 5
+    plan = sorted(e.s["planning"], key=lambda p: p["datum"])[0]
+    ent = hass.data["calendar"].get_entity("calendar.eet_planning")
+    nieuwe_dag = VANDAAG + timedelta(days=5)
+    nstart = dt_util.start_of_local_day(datetime.combine(nieuwe_dag, datetime.min.time())) + timedelta(hours=17)
+    await ent.async_update_event(plan["uid"], {"dtstart": nstart, "dtend": nstart + timedelta(hours=1),
+                                               "summary": plan["titel"], "description": f"verschoven\n\neten:{plan['id']}"})
+    await e.sync(forceer=True)
+    check(plan["datum"] == nieuwe_dag.isoformat(), "verschuiving in agenda overgenomen")
+
+    # in de agenda verwijderen
+    tweede = sorted(e.s["planning"], key=lambda p: p["datum"])[0]
+    await ent.async_delete_event(tweede["uid"])
+    await e.sync(forceer=True)
+    check(all(p["id"] != tweede["id"] for p in e.s["planning"]), "verwijdering in agenda overgenomen")
+
+    # los event overnemen en koppelen aan recept
+    los = e.extern[0]
+    pid = (await e.overnemen(los["datum"], los["uid"], rid, None))["id"]
+    await e.sync(forceer=True)
+    check(not e.extern and any(p["id"] == pid and p["titel"] == "Linzensoep" for p in e.s["planning"]), "los event overgenomen")
+
+    # wijzigen via de planning: ander recept -> event vervangen
+    p = next(p for p in e.s["planning"] if p["id"] == pid)
+    oude_uid = p["uid"]
+    await e.plan(p["datum"], {"recept_id": rid2}, pid)
+    check(p["titel"] == "Wraps" and p["uid"] and p["uid"] != oude_uid, "recept gewisseld, event vervangen")
+
+    # beoordelen
+    e.beoordeel(pid, "A", 5)
+    e.beoordeel(pid, "B", 2)
+    e.beoordeel(pid, "B", 3)  # overschrijft
+    data = ws.eten_payload(c)
+    sc = next(x for x in data["recepten"] if x["id"] == rid2)["score"]
+    check(sc and sc["gem"] == 4.0 and sc["personen"] == {"A": 5.0, "B": 3.0}, "beoordeling per persoon")
+    check(len(data["producten"]) > 10 and data["agendas"] == ["calendar.eet_planning"], "payload compleet")
+
+    # websocket-commando's geregistreerd
+    from homeassistant.components.websocket_api import const as wsc
+    handlers = hass.data[wsc.DOMAIN] if wsc.DOMAIN in hass.data else {}
+    check("boodschappen/eten_goedkeuren" in handlers, "websocket-commando's geregistreerd")
+
+    await e.plan_verwijderen(pid)
+    await e.sync(forceer=True)
+    check(all(p["id"] != pid for p in e.s["planning"]), "plan verwijderd")
+    print("AI-taken:", vragen)
+    await hass.async_stop(force=True)
+    await runner.cleanup()
+    print("\nRESULTAAT:", "alles goed" if not FOUTEN else f"{len(FOUTEN)} fout(en): {FOUTEN}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

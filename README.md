@@ -11,6 +11,13 @@ Een eenvoudige boodschappenlijst per winkel bovenop [Grocy](https://grocy.info),
 - **Aanbiedingen** (inklapbaar onder de lijst; producten op je lijst die in de aanbieding zijn krijgen een label *actie*): elke ochtend worden de aanbiedingen van Lidl (via de integratie [ha-lidl](https://github.com/FaserF/ha-lidl), incl. Lidl Plus-coupons en volgende week) en Jumbo (jumbo.com) gekoppeld aan je vaste producten, met je normale prijs en een inslaadvoorstel op basis van verbruik en houdbaarheid. Koppelen gebeurt met een AI-taak (`ai_task`, bijv. Google Gemini).
 - **Bonnetjes**: actie `boodschappen.bon_verwerken` zet de betaalde prijs op afgevinkte aankopen, boekt alleen ongeplande aankopen en zet onbekende bonregels klaar om te koppelen op de pagina *Boodschappen → Bonnetjes*. Koppelingen (inclusief "stuks per bonregel") worden onthouden.
 
+- **Eten** (aparte pagina `/eten`): recepten, weekmenu en beoordelingen, zonder losse receptenapp.
+  - *Recepten* toevoegen via een link (schema.org-recept of paginatekst), geplakte tekst of zelf invullen; de AI-taak zet het om en koppelt de ingrediënten aan je Grocy-producten.
+  - *Weekmenu*: de AI-taak doet een voorstel op basis van je huisregels, de recepten, wat recent gegeten is en de beoordelingen per persoon. Na goedkeuren komen de maaltijden in een agenda naar keuze (bijv. een gedeelde Google-agenda) en de ontbrekende ingrediënten op de boodschappenlijst van de juiste winkel.
+  - De agenda blijft bruikbaar op je telefoon: verschuif of verwijder je daar een maaltijd, dan neemt de planning dat over. Events zonder kenmerk (zelf ingevoerd) zie je ook en kun je aan een recept koppelen.
+  - *Koken*: stap-voor-stap weergave voor een tablet in de keuken (scherm blijft aan), porties schalen.
+  - *Beoordelen*: per persoon een score na de maaltijd; telt mee in volgende voorstellen.
+
 Daarnaast maakt de integratie `todo`-entiteiten per winkel, zodat de lijsten ook werken in de standaard To-do-weergave en met Assist ("zet melk op Boodschappen Lidl").
 
 ## Installatie
@@ -46,11 +53,17 @@ data:
       totaal: 3.78
 ```
 
+## Eten instellen
+
+Open *Eten → ⚙* en kies de agenda, het tijdstip van de maaltijd, de personen die beoordelen en je huisregels
+(vrije tekst voor het voorstel, bijv. wie op welke dag kookt, wie mee-eet, vriezerdagen, dieetwensen).
+
 ## Ontwikkelen
 
 ```bash
 pip install homeassistant pytest
-pytest tests/test_boodschappen.py
+pytest tests/
+python3 tests/eten_smoke.py   # echte HA-core met Local Calendar en een nep-AI-taak
 ```
 
 ## Licentie

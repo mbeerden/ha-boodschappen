@@ -2,7 +2,9 @@
   "domain": "boodschappen",
   "name": "Boodschappen",
   "after_dependencies": [
-    "grocy"
+    "grocy",
+    "calendar",
+    "ai_task"
   ],
   "codeowners": [],
   "config_flow": true,
@@ -17,5 +19,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/mbeerden/ha-boodschappen/issues",
   "requirements": [],
-  "version": "0.4.5"
+  "version": "0.5.0"
 }
