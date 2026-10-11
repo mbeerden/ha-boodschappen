@@ -109,6 +109,18 @@ async def main():
                     uit.append({"datum": d["datum"], "dag": d["dag"], "recept_id": rec["id"], "titel": rec["naam"], "kookt": "Papa",
                                 "porties": 8, "vriezer": 4, "boodschappen": True, "reden": "lekker"})
             return {"data": json.dumps(uit)}
+        if "dag aanpassen" in call.data["task_name"]:
+            dag = re.search(r"Deze dag: ([A-Z]+) (\S+)", instr)
+            assert dag, "dag ontbreekt in prompt"
+            if "goulash" in instr:
+                return {"data": json.dumps({"recept_id": None, "titel": "Vega goulash", "kookt": "Papa", "porties": 5,
+                    "vriezer": 0, "boodschappen": True, "reden": "wens", "nieuw_recept": {
+                        "naam": "Vega goulash", "porties": 5, "tijd": 50, "vega": True, "tags": ["stoof"],
+                        "ingredienten": [{"tekst": "3 lente-uitjes", "product_id": 23, "aantal": 3}, {"tekst": "paprikapoeder", "basis": True}],
+                        "stappen": ["Snijd", "Stoof 40 min"]}})}
+            rec = json.loads(re.search(r"Recepten: (\[.*?\])\n", instr, re.S).group(1))
+            return {"data": json.dumps({"recept_id": rec[0]["id"], "titel": rec[0]["naam"], "kookt": "Mama", "porties": 4,
+                                        "vriezer": 0, "boodschappen": True, "reden": "uit de bibliotheek", "nieuw_recept": None})}
         return {"data": "```json\n" + json.dumps({
             "naam": "Linzensoep", "porties": 4, "tijd": 35, "vega": True, "tags": ["soep"],
             "ingredienten": [{"tekst": "2 uien", "product_id": 15, "aantal": 2},
@@ -260,6 +272,49 @@ async def main():
     from homeassistant.components.websocket_api import const as wsc
     handlers = hass.data[wsc.DOMAIN] if wsc.DOMAIN in hass.data else {}
     check("boodschappen/eten_goedkeuren" in handlers, "websocket-commando's geregistreerd")
+
+    # --- dag aanpassen met de AI ---
+    dag12 = (VANDAAG + timedelta(days=12)).isoformat()
+    await e.voorstel_maken(dag12, 2, "")
+    await e.dag_aanpassen(dag12, "een vegetarische goulash")
+    vd = next(x for x in e.s["voorstel"]["dagen"] if x["datum"] == dag12)
+    cid = vd["concept"]["id"] if vd.get("concept") else None
+    check(cid and vd["recept_id"] == cid and vd["titel"] == "Vega goulash" and cid not in e.s["recepten"],
+          "voorstel-dag vervangen door nieuw recept (nog niet in bibliotheek)")
+    check("nieuw" in vd["concept"]["tags"] and vd["wens"] == "een vegetarische goulash", "concept met label nieuw en wens")
+    e.voorstel_wijzig(dag12, {"porties": 5})
+    STATE["log"].clear()
+    await e.voorstel_goedkeuren()
+    p12 = next(p for p in e.s["planning"] if p["datum"] == dag12)
+    check(cid in e.s["recepten"] and p12["recept_id"] == cid, "na goedkeuren in bibliotheek en gepland")
+    adds = {l[1].get("product_id"): l[1].get("amount") for l in STATE["log"] if l[0] == "add"}
+    check(adds.get(23) == 3, f"ingrediënten nieuw recept op de lijst ({adds})")
+
+    # weggegooid voorstel: concept komt niet in de bibliotheek
+    dag14 = (VANDAAG + timedelta(days=14)).isoformat()
+    await e.voorstel_maken(dag14, 1, "")
+    await e.dag_aanpassen(dag14, "goulash")
+    weg_id = e.s["voorstel"]["dagen"][0]["concept"]["id"]
+    e.voorstel_weg()
+    check(weg_id not in e.s["recepten"], "weggegooid concept niet bewaard")
+
+    # geplande dag: eerst suggestie, planning blijft tot toepassen
+    oud_uid = p12["uid"]
+    await e.dag_aanpassen(dag12, "iets anders", p12["id"])
+    sug = e.s["suggesties"].get(dag12)
+    check(sug and p12["recept_id"] == cid and p12["uid"] == oud_uid, "suggestie getoond, planning ongewijzigd")
+    await e.suggestie_toepassen(dag12)
+    check(p12["recept_id"] == sug["recept_id"] and p12["uid"] != oud_uid and dag12 not in e.s["suggesties"],
+          "suggestie toegepast, agenda bijgewerkt")
+    await e.dag_aanpassen(dag12, "goulash", p12["id"])
+    sug2 = e.s["suggesties"][dag12]["concept"]["id"]
+    e.suggestie_weg(dag12)
+    check(dag12 not in e.s["suggesties"] and sug2 not in e.s["recepten"], "suggestie weggegooid")
+    await e.dag_aanpassen(dag12, "goulash", p12["id"])
+    sug3 = e.s["suggesties"][dag12]["concept"]["id"]
+    await e.suggestie_toepassen(dag12)
+    check(sug3 in e.s["recepten"] and p12["titel"] == "Vega goulash", "toegepast concept in bibliotheek")
+    await e.plan_verwijderen(p12["id"])
 
     await e.plan_verwijderen(pid)
     await e.sync(forceer=True)

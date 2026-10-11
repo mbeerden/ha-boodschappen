@@ -254,6 +254,41 @@ def weekmenu_prompt(
     )
 
 
+def dag_prompt(
+    dag: dict,
+    wens: str,
+    week: list[dict],
+    recepten: list[dict],
+    huisregels: str,
+    producten: list[dict],
+    vandaag: date,
+) -> str:
+    return (
+        "Je past één avondmaaltijd aan in het weekmenu van een gezin. Doe één voorstel voor deze dag.\n"
+        "Antwoord ALLEEN met één JSON-object:\n"
+        '{"recept_id": str|null, "titel": str, "kookt": str, "porties": int, "vriezer": int, "boodschappen": bool, '
+        '"reden": str, "nieuw_recept": null | {"naam": str, "porties": int, "tijd": int, "vega": bool, "tags": [str], '
+        '"ingredienten": [{"tekst": str, "product_id": int|null, "aantal": number, "basis": bool}], "stappen": [str]}}\n'
+        "- Volg de wens van de gebruiker; die gaat voor.\n"
+        "- Past een recept uit de receptenlijst bij de wens, kies dat (recept_id, titel = naam, nieuw_recept null).\n"
+        "- Past er geen, schrijf dan een nieuw, goed uitvoerbaar recept (recept_id null, nieuw_recept ingevuld, "
+        "titel = naam). Ingrediënten: product_id = id uit de productlijst dat je ervoor koopt (null als er niets "
+        "past); aantal = verpakkingen/stuks voor de porties van het recept; basis=true voor wat altijd in huis is "
+        "(zout, peper, olie, water, gedroogde kruiden). Stappen kort, één handeling per stap.\n"
+        "- Houd rekening met de huisregels (wie kookt en wie eet mee op deze weekdag, dieetwensen) en kies niet "
+        "iets wat al elders in deze week staat.\n"
+        "- porties = alle porties die gekookt worden (incl. vriezer); vriezer = hoeveel daarvan de vriezer in gaan.\n"
+        "- reden: één korte zin.\n\n"
+        f"Vandaag: {DAGEN[vandaag.weekday()]} {vandaag.isoformat()}\n"
+        f"Deze dag: {dag['dag'].upper()} {dag['datum']}\n"
+        f"Wens: {wens or '-'}\n\n"
+        f"Huisregels:\n{huisregels or '-'}\n\n"
+        f"Rest van de week:\n{dagen_tekst(week) or '-'}\n\n"
+        f"Recepten: {json.dumps(recepten, ensure_ascii=False)}\n\n"
+        f"Producten (id: naam): {json.dumps({p['id']: p['name'] for p in producten}, ensure_ascii=False)}"
+    )
+
+
 def weekdag_fouten(res: list, dagen: list[dict]) -> str:
     """Controleer of de AI de juiste weekdag bij elke datum gebruikt; geeft een correctietekst of ''."""
     juist = {d["datum"]: d["dag"] for d in dagen}
@@ -338,6 +373,7 @@ class Eten:
             "recepten": data.get("recepten", {}),
             "planning": data.get("planning", []),
             "voorstel": data.get("voorstel"),
+            "suggesties": data.get("suggesties", {}),
             "beoordelingen": data.get("beoordelingen", []),
             "instellingen": {**DEFAULT_INSTELLINGEN, **(data.get("instellingen") or {})},
         }
@@ -345,6 +381,8 @@ class Eten:
     def save(self) -> None:
         cutoff = (date.today() - timedelta(days=120)).isoformat()
         self.s["planning"] = [p for p in self.s["planning"] if p["datum"] >= cutoff]
+        gisteren = (date.today() - timedelta(days=1)).isoformat()
+        self.s["suggesties"] = {k: v for k, v in self.s.get("suggesties", {}).items() if k >= gisteren}
         self._store.async_delay_save(lambda: self.s, 1)
 
     @property
@@ -365,6 +403,7 @@ class Eten:
             "recepten": recepten,
             "planning": sorted(self.s["planning"], key=lambda p: p["datum"]),
             "voorstel": self.s["voorstel"],
+            "suggesties": self.s["suggesties"],
             "beoordelingen": self.s["beoordelingen"][-400:],
             "instellingen": self.inst,
             "extern": self.extern,
@@ -503,12 +542,90 @@ class Eten:
             if d["datum"] == datum:
                 if "recept_id" in velden:
                     rid = velden["recept_id"] or None
-                    d["recept_id"] = rid if rid in self.s["recepten"] else None
-                    if d["recept_id"]:
-                        d["titel"] = self.s["recepten"][rid]["naam"]
+                    concept = d.get("concept")
+                    if concept and rid == concept["id"]:
+                        d["recept_id"] = rid
+                        d["titel"] = concept["naam"]
+                    else:
+                        d["recept_id"] = rid if rid in self.s["recepten"] else None
+                        if d["recept_id"]:
+                            d["titel"] = self.s["recepten"][rid]["naam"]
                 for k in ("titel", "kookt", "porties", "vriezer", "boodschappen", "overslaan"):
                     if k in velden and not (k == "titel" and d.get("recept_id") and "recept_id" not in velden):
                         d[k] = velden[k]
+        self.save()
+
+    async def dag_aanpassen(self, datum: str, wens: str, plan_id: str | None = None) -> None:
+        """Eén dag opnieuw laten invullen door de AI, met een wens. In een voorstel direct vervangen;
+        bij een geplande dag eerst als suggestie tonen (toepassen of weggooien)."""
+        d = date.fromisoformat(datum)
+        ws = week_start(d)
+        v = self.s.get("voorstel")
+        in_voorstel = bool(v) and not plan_id and any(x["datum"] == datum for x in v["dagen"])
+        # rest van de week: voorstel, planning en losse agenda-events
+        week: dict[str, dict] = {}
+        for p in self.s["planning"]:
+            if ws.isoformat() <= p["datum"] < (ws + timedelta(days=7)).isoformat():
+                week[p["datum"]] = {"datum": p["datum"], "dag": DAGEN[date.fromisoformat(p["datum"]).weekday()], "vast": p.get("titel")}
+        for e in self.extern:
+            if ws.isoformat() <= e["datum"] < (ws + timedelta(days=7)).isoformat() and e["datum"] not in week:
+                week[e["datum"]] = {"datum": e["datum"], "dag": DAGEN[date.fromisoformat(e["datum"]).weekday()], "agenda": e["titel"]}
+        if v:
+            for x in v["dagen"]:
+                if ws.isoformat() <= x["datum"] < (ws + timedelta(days=7)).isoformat():
+                    week[x["datum"]] = {"datum": x["datum"], "dag": DAGEN[date.fromisoformat(x["datum"]).weekday()], "vast": x["titel"]}
+        week.pop(datum, None)
+        gem = gemiddelden(self.s["beoordelingen"])
+        laatst: dict[str, str] = {}
+        for p in self.s["planning"]:
+            if p.get("recept_id"):
+                laatst[p["recept_id"]] = max(laatst.get(p["recept_id"], ""), p["datum"])
+        recepten = [recept_compact(r, gem.get(r["id"]), laatst.get(r["id"])) for r in self.s["recepten"].values()]
+        res = await self._vraag_ai("Eten: dag aanpassen", dag_prompt(
+            {"datum": datum, "dag": DAGEN[d.weekday()]}, wens, sorted(week.values(), key=lambda x: x["datum"]),
+            recepten, self.inst.get("huisregels", ""), self._producten(), date.today()))
+        if not isinstance(res, dict):
+            raise ValueError("De AI gaf geen bruikbaar voorstel terug")
+        concept = None
+        rid = res.get("recept_id") if res.get("recept_id") in self.s["recepten"] else None
+        if not rid and isinstance(res.get("nieuw_recept"), dict) and res["nieuw_recept"].get("naam"):
+            concept = schoon_recept({**res["nieuw_recept"], "id": None})
+            concept["tags"] = list(dict.fromkeys([*concept["tags"], "nieuw"]))[:8]
+            rid = concept["id"]
+        titel = concept["naam"] if concept else (self.s["recepten"][rid]["naam"] if rid else str(res.get("titel") or "?"))
+        kookt = str(res.get("kookt") or "")
+        if kookt.strip().lower() in ("niemand", "-", "geen", "n.v.t."):
+            kookt = ""
+        nieuw = {
+            "datum": datum, "recept_id": rid, "titel": titel, "kookt": kookt,
+            "porties": res.get("porties") or None, "vriezer": res.get("vriezer") or 0,
+            "boodschappen": bool(res.get("boodschappen", True)), "reden": res.get("reden") or "",
+            "wens": wens, "concept": concept,
+        }
+        if in_voorstel:
+            for i, x in enumerate(v["dagen"]):
+                if x["datum"] == datum:
+                    v["dagen"][i] = {**x, **nieuw, "vast": False, "overslaan": False}
+        else:
+            nieuw["plan_id"] = plan_id
+            self.s["suggesties"][datum] = nieuw
+        self.save()
+
+    async def suggestie_toepassen(self, datum: str) -> dict:
+        sug = self.s["suggesties"].pop(datum, None)
+        if not sug:
+            raise ValueError("Geen suggestie voor deze dag")
+        if sug.get("concept"):
+            self.s["recepten"][sug["concept"]["id"]] = sug["concept"]
+        item = await self.plan(datum, {k: sug.get(k) for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen")},
+                               sug.get("plan_id"), sync=False)
+        item["op_lijst"] = False
+        self.save()
+        toegevoegd = await self.ingredienten_op_lijst([item["id"]]) if item.get("boodschappen", True) else 0
+        return {"op_lijst": toegevoegd}
+
+    def suggestie_weg(self, datum: str) -> None:
+        self.s["suggesties"].pop(datum, None)
         self.save()
 
     def voorstel_weg(self) -> None:
@@ -523,6 +640,9 @@ class Eten:
         for d in v["dagen"]:
             if d.get("overslaan") or d.get("vast"):
                 continue
+            c = d.get("concept")
+            if c and d.get("recept_id") == c["id"]:
+                self.s["recepten"][c["id"]] = c  # nieuw recept pas nu in de bibliotheek
             nieuw.append(await self.plan(d["datum"], {k: d.get(k) for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen")}, sync=False))
             await self._extern_weg(d.get("vervangt") or [])
         self.s["voorstel"] = None

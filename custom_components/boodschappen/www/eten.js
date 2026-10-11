@@ -79,7 +79,7 @@ class EtenPanel extends HTMLElement {
 
   _poll() {
     const a = this.shadowRoot.activeElement;
-    if (this.busy || this.edit || (this.view && this.view.soort !== "recept") || (a && /INPUT|SELECT|TEXTAREA/.test(a.tagName))) return;
+    if (this.busy || this.edit || this.aanpas || (this.view && this.view.soort !== "recept") || (a && /INPUT|SELECT|TEXTAREA/.test(a.tagName))) return;
     this._load();
   }
 
@@ -281,7 +281,7 @@ class EtenPanel extends HTMLElement {
             ${r ? `<button class="sec-btn" data-act="koken" data-id="${r.id}">Koken</button>` : ""}
             <button class="sec-btn" data-act="plan" data-datum="${ds}">Wijzig</button>
           </div>
-        </div>${beoordeel}`;
+        </div>${ds >= vandaag ? this._suggestie(ds) || this._aanpasBlok(ds, p.id) : ""}${beoordeel}`;
     }
     let html = "";
     for (const e of ex) {
@@ -292,8 +292,9 @@ class EtenPanel extends HTMLElement {
     return html;
   }
 
-  _receptOpties(gekozen, leegTekst = "— eigen titel, zonder recept —") {
+  _receptOpties(gekozen, leegTekst = "— eigen titel, zonder recept —", concept = null) {
     return `<option value="">${esc(leegTekst)}</option>` +
+      (concept ? `<option value="${concept.id}" ${concept.id === gekozen ? "selected" : ""}>✨ ${esc(concept.naam)} (nieuw recept)</option>` : "") +
       this.recepten.map((r) => `<option value="${r.id}" ${r.id === gekozen ? "selected" : ""}>${esc(r.naam)}${r.vega ? " 🌱" : ""}</option>`).join("");
   }
 
@@ -301,7 +302,9 @@ class EtenPanel extends HTMLElement {
     const ds = vs.datum;
     return `<div class="vform ${vs.overslaan ? "uit" : ""}" data-datum="${ds}">
       <label class="veld"><span>Gerecht</span>
-        <select data-vs="recept_id">${this._receptOpties(vs.recept_id)}</select></label>
+        <select data-vs="recept_id">${this._receptOpties(vs.recept_id, undefined, vs.concept)}</select></label>
+      ${vs.concept && vs.recept_id === vs.concept.id ? this._conceptInfo(vs.concept) : ""}
+      ${this._aanpasBlok(ds, null, vs.wens)}
       ${!vs.recept_id ? `<label class="veld"><span>Titel</span><input data-vs="titel" value="${esc(vs.titel)}"></label>` : ""}
       ${vs.agenda ? `<p class="reden">In de agenda stond: ${esc(vs.agenda)}</p>` : ""}
       ${vs.reden ? `<p class="reden">${esc(vs.reden)}</p>` : ""}
@@ -313,6 +316,51 @@ class EtenPanel extends HTMLElement {
       <div class="rij3">
         <label class="check"><input type="checkbox" data-vs="boodschappen" ${vs.boodschappen !== false ? "checked" : ""}> Boodschappen</label>
         <label class="check"><input type="checkbox" data-vs="overslaan" ${vs.overslaan ? "checked" : ""}> Niet plannen</label>
+      </div>
+    </div>`;
+  }
+
+  _aanpasBlok(ds, planId, vorigeWens = "") {
+    if (this.aanpas !== ds)
+      return `<button class="ai-btn" data-act="aanpasopen" data-datum="${ds}">✨ Aanpassen met Gemini</button>`;
+    return `<div class="aanpas">
+      <label class="veld"><span>Wat wil je op ${esc(dagNaam(ds))}?</span>
+        <input class="aanpas-wens" type="text" enterkeyhint="go" value="${esc(vorigeWens || "")}"
+          placeholder="Bijv. een ovenschotel, of een vegetarische goulash"></label>
+      <div class="knoppen">
+        <span class="vul"></span>
+        <button class="sec-btn" data-act="aanpasdicht">Annuleren</button>
+        <button class="primary" data-act="aanpasdoe" data-datum="${ds}" ${planId ? `data-plan="${planId}"` : ""}>Doe voorstel</button>
+      </div>
+    </div>`;
+  }
+
+  _conceptInfo(c) {
+    return `<details class="concept"><summary>✨ Nieuw recept${c.tijd ? ` · ${c.tijd} min` : ""} · ${(c.ingredienten || []).length} ingrediënten${c.vega ? " · 🌱" : ""}</summary>
+      <ul class="ingr">${(c.ingredienten || []).map((i) => {
+        const p = i.product_id ? this.product(i.product_id) : null;
+        return `<li><span>${esc(i.tekst)}</span>${i.basis ? `<small>in huis</small>` : p ? `<small>${esc(p.name)}</small>` : `<small class="warn">niet gekoppeld</small>`}</li>`;
+      }).join("")}</ul>
+      <ol class="stappen">${(c.stappen || []).map((x) => `<li>${esc(x)}</li>`).join("")}</ol>
+      <p class="hint">Komt in je recepten zodra je dit goedkeurt.</p>
+    </details>`;
+  }
+
+  _suggestie(ds) {
+    const s = (this.d.suggesties || {})[ds];
+    if (!s) return "";
+    const meta = [s.kookt ? `kookt: ${esc(s.kookt)}` : "", s.porties ? `${fmtNum(s.porties)} porties` : "", s.vriezer ? `${fmtNum(s.vriezer)} naar vriezer` : ""].filter(Boolean).join(" · ");
+    return `<div class="suggestie">
+      <p class="sugkop">✨ Voorstel van Gemini${s.wens ? ` voor “${esc(s.wens)}”` : ""}</p>
+      <p class="sugtitel">${esc(s.titel)}</p>
+      ${meta ? `<small>${meta}</small>` : ""}
+      ${s.reden ? `<p class="reden">${esc(s.reden)}</p>` : ""}
+      ${s.concept ? this._conceptInfo(s.concept) : ""}
+      <div class="knoppen">
+        <button class="sec-btn" data-act="sugweg" data-datum="${ds}">Weggooien</button>
+        <button class="sec-btn" data-act="aanpasopen" data-datum="${ds}" data-wens="${esc(s.wens || "")}">Ander voorstel</button>
+        <span class="vul"></span>
+        <button class="primary" data-act="sugtoepassen" data-datum="${ds}">Toepassen</button>
       </div>
     </div>`;
   }
@@ -623,6 +671,43 @@ class EtenPanel extends HTMLElement {
       case "plan":
         this.edit = b.dataset.datum;
         return this._render();
+      case "aanpasopen": {
+        this.aanpas = b.dataset.datum;
+        this._aanpasWens = b.dataset.wens || "";
+        this._render();
+        const inp = root.querySelector(".aanpas-wens");
+        if (inp) {
+          if (this._aanpasWens) inp.value = this._aanpasWens;
+          inp.focus();
+          inp.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter") root.querySelector("[data-act=aanpasdoe]")?.click();
+          });
+        }
+        return;
+      }
+      case "aanpasdicht":
+        this.aanpas = null;
+        return this._render();
+      case "aanpasdoe": {
+        const wens = root.querySelector(".aanpas-wens")?.value.trim() || "";
+        if (!wens) {
+          this.err = "Vertel Gemini wat je wilt, bijvoorbeeld 'een ovenschotel'.";
+          return this._render();
+        }
+        this.aanpas = null;
+        return this._do({ type: "boodschappen/eten_dag_aanpassen", datum: b.dataset.datum, wens, plan_id: b.dataset.plan || null },
+          `Gemini zoekt iets voor ${dagNaam(b.dataset.datum)}…`);
+      }
+      case "sugtoepassen": {
+        const res = await this._do({ type: "boodschappen/eten_suggestie_toepassen", datum: b.dataset.datum }, "Agenda en boodschappen bijwerken…");
+        if (res && typeof res === "object") {
+          this.melding = `Aangepast in de agenda${res.op_lijst ? `, ${res.op_lijst} product(en) op de boodschappenlijst` : ""}.`;
+          this._render();
+        }
+        return;
+      }
+      case "sugweg":
+        return this._do({ type: "boodschappen/eten_suggestie_weg", datum: b.dataset.datum });
       case "planannuleer":
         this.edit = null;
         return this._render();
@@ -909,6 +994,19 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; flex: 1; }
 .check input { width: 20px; height: 20px; }
 .check.klein { font-size: 13px; min-height: 0; color: var(--secondary-text-color); white-space: nowrap; }
 .check.klein input { width: 18px; height: 18px; }
+
+/* aanpassen met Gemini */
+.ai-btn { justify-self: start; margin-top: 4px; padding: 8px 2px; color: var(--primary-color); font-size: 14px; font-weight: 500; text-align: left; }
+.aanpas, .suggestie { display: grid; gap: 6px; margin-top: 8px; padding: 10px 12px; border-radius: 12px;
+  background: color-mix(in srgb, var(--acc) 10%, var(--card-background-color)); }
+.aanpas .knoppen, .suggestie .knoppen { margin-top: 4px; }
+.sugkop { margin: 0; font-size: 13px; color: var(--secondary-text-color); }
+.sugtitel { margin: 0; font-size: 17px; font-weight: 500; }
+.suggestie small { color: var(--secondary-text-color); font-size: 13px; }
+.concept { font-size: 14px; }
+.concept summary { cursor: pointer; padding: 6px 0; color: var(--primary-color); }
+.concept .ingr li { font-size: 14px; padding: 6px 2px; }
+.concept .stappen li { font-size: 14px; padding: 3px 0 5px 4px; }
 
 /* beoordelen */
 .beoordeelkop { width: 100%; display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; padding: 10px 0 2px;

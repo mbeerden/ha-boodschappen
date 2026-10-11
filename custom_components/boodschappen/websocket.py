@@ -256,6 +256,18 @@ async def _e_overnemen(e, msg):
     return item["id"]
 
 
+async def _e_dag_aanpassen(e, msg):
+    await e.dag_aanpassen(msg["datum"], msg.get("wens") or "", msg.get("plan_id"))
+
+
+async def _e_sug_toepassen(e, msg):
+    return await e.suggestie_toepassen(msg["datum"])
+
+
+async def _e_sug_weg(e, msg):
+    e.suggestie_weg(msg["datum"])
+
+
 async def _e_historie(e, msg):
     return e.historie(msg["items"])
 
@@ -300,6 +312,10 @@ ETEN_COMMANDS = [
     ({vol.Required("type"): "boodschappen/eten_overnemen", vol.Required("datum"): str, vol.Optional("uid"): vol.Any(None, str),
       vol.Optional("recept_id"): vol.Any(None, str), vol.Optional("titel"): vol.Any(None, str),
       vol.Optional("velden"): dict}, _e_overnemen, False),
+    ({vol.Required("type"): "boodschappen/eten_dag_aanpassen", vol.Required("datum"): str,
+      vol.Optional("wens"): vol.Any(None, str), vol.Optional("plan_id"): vol.Any(None, str)}, _e_dag_aanpassen, False),
+    ({vol.Required("type"): "boodschappen/eten_suggestie_toepassen", vol.Required("datum"): str}, _e_sug_toepassen, False),
+    ({vol.Required("type"): "boodschappen/eten_suggestie_weg", vol.Required("datum"): str}, _e_sug_weg, False),
     ({vol.Required("type"): "boodschappen/eten_historie", vol.Required("items"): [dict]}, _e_historie, False),
     ({vol.Required("type"): "boodschappen/eten_op_lijst", vol.Required("plan_ids"): [str]}, _e_lijst, False),
     ({vol.Required("type"): "boodschappen/eten_beoordeel", vol.Required("plan_id"): str, vol.Required("persoon"): str,
