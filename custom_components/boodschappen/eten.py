@@ -222,7 +222,11 @@ def weekmenu_prompt(
         "iemand anders kookt).\n"
         "- Weeg mee: de huisregels, de beoordelingen per persoon (scores 1-5) van wie die dag mee-eet, "
         "afwisseling (niet hetzelfde als recent gegeten), en de bereidingstijd.\n"
-        "- Dagen met 'vast' staan al in de agenda: neem die titel over, kies geen ander gerecht.\n"
+        "- Dagen met 'vast' zijn al gepland: neem die titel over, kies geen ander gerecht.\n"
+        "- Dagen met 'agenda' hebben al een globaal idee in de agenda (bijv. 'Curry (voor 3x koken)' of "
+        "'Soep (uit de vriezer)'): houd je daaraan. Kies er een passend recept bij als dat er is, anders neem je "
+        "de titel over. Bij 'uit de vriezer', een uitje of als iemand anders kookt: geen recept nodig en "
+        "boodschappen=false.\n"
         "- reden: één korte zin waarom.\n\n"
         f"Vandaag: {vandaag.isoformat()} ({DAGEN[vandaag.weekday()]})\n"
         f"Huisregels:\n{huisregels or '-'}\n\n"
@@ -276,6 +280,7 @@ def schoon_recept(r: dict, bestaand: dict | None = None) -> dict:
         "ingredienten": ingr,
         "stappen": stappen,
         "bron": r.get("bron") or (bestaand or {}).get("bron"),
+        "mealie_slug": r.get("mealie_slug") or (bestaand or {}).get("mealie_slug"),
         "notitie": r.get("notitie") or "",
         "bijgewerkt": datetime.now().isoformat(timespec="minutes"),
     })
@@ -407,7 +412,7 @@ class Eten:
             if iso in gepland:
                 dag["vast"] = gepland[iso]["titel"]
             elif iso in extern:
-                dag["vast"] = extern[iso]
+                dag["agenda"] = extern[iso]
             te_plannen.append(dag)
         gem = gemiddelden(self.s["beoordelingen"])
         laatst: dict[str, str] = {}
@@ -422,6 +427,10 @@ class Eten:
         if not isinstance(res, list):
             raise ValueError("De AI gaf geen bruikbaar weekmenu terug")
         vast = {d["datum"]: d.get("vast") for d in te_plannen}
+        vervangt: dict[str, list[str]] = {}
+        for e in self.extern:
+            if e.get("uid"):
+                vervangt.setdefault(e["datum"], []).append(e["uid"])
         dagen_uit = []
         for x in res:
             iso = str(x.get("datum") or "")[:10]
@@ -434,6 +443,7 @@ class Eten:
                 "porties": x.get("porties") or None, "vriezer": x.get("vriezer") or 0,
                 "boodschappen": bool(x.get("boodschappen", True)) and not vast[iso],
                 "reden": x.get("reden") or "", "vast": bool(vast[iso]),
+                "agenda": extern.get(iso), "vervangt": [] if vast[iso] else vervangt.get(iso, []),
             })
         dagen_uit.sort(key=lambda x: x["datum"])
         self.s["voorstel"] = {"start": start, "wens": wens, "dagen": dagen_uit, "gemaakt": datetime.now().isoformat(timespec="minutes")}
@@ -468,6 +478,7 @@ class Eten:
             if d.get("overslaan") or d.get("vast"):
                 continue
             nieuw.append(await self.plan(d["datum"], {k: d.get(k) for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen")}, sync=False))
+            await self._extern_weg(d.get("vervangt") or [])
         self.s["voorstel"] = None
         self.save()
         toegevoegd = await self.ingredienten_op_lijst([p["id"] for p in nieuw])
@@ -500,16 +511,36 @@ class Eten:
             await self.ingredienten_op_lijst([item["id"]])
         return item
 
-    async def overnemen(self, datum: str, uid: str | None, recept_id: str | None, titel: str | None) -> dict:
-        """Een los agenda-event (zonder kenmerk) vervangen door een geplande maaltijd."""
+    async def _extern_weg(self, uids: list[str]) -> None:
         ent = self._agenda()
-        if ent is not None and uid:
-            try:
-                await ent.async_delete_event(uid)
-            except Exception as err:  # noqa: BLE001
-                _LOGGER.debug("Los event verwijderen: %s", err)
-        self.extern = [e for e in self.extern if e.get("uid") != uid]
-        return await self.plan(datum, {"recept_id": recept_id, "titel": titel or "?"})
+        for uid in uids:
+            if ent is not None and uid:
+                try:
+                    await ent.async_delete_event(uid)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Los event verwijderen: %s", err)
+        self.extern = [e for e in self.extern if e.get("uid") not in uids]
+
+    async def overnemen(self, datum: str, uid: str | None, recept_id: str | None, titel: str | None,
+                        velden: dict | None = None) -> dict:
+        """Een los agenda-event (zonder kenmerk) vervangen door een geplande maaltijd."""
+        await self._extern_weg([uid] if uid else [])
+        return await self.plan(datum, {**(velden or {}), "recept_id": recept_id, "titel": titel or "?"})
+
+    def historie(self, items: list[dict]) -> int:
+        """Eerder gegeten maaltijden vastleggen (zonder de agenda aan te raken), voor 'laatst gegeten'."""
+        bekend = {p["datum"] for p in self.s["planning"]}
+        n = 0
+        for x in items:
+            if x["datum"] in bekend or x.get("recept_id") not in self.s["recepten"]:
+                continue
+            self.s["planning"].append({"id": nieuw_id(), "datum": x["datum"], "recept_id": x["recept_id"],
+                                       "titel": self.s["recepten"][x["recept_id"]]["naam"], "uid": None,
+                                       "op_lijst": True, "boodschappen": False, "historie": True})
+            bekend.add(x["datum"])
+            n += 1
+        self.save()
+        return n
 
     async def plan_verwijderen(self, plan_id: str) -> None:
         item = next((p for p in self.s["planning"] if p["id"] == plan_id), None)
@@ -663,7 +694,9 @@ class Eten:
         extern = []
         for e in events:
             pid = marker_uit(e.description)
-            start = e.start if isinstance(e.start, date) and not isinstance(e.start, datetime) else dt_util.as_local(e.start).date()
+            if not isinstance(e.start, datetime):
+                continue  # hele-dag-events (bijv. afvalkalender) zijn geen maaltijden
+            start = dt_util.as_local(e.start).date()
             if pid:
                 per_id[pid] = (e, start.isoformat())
             else:

@@ -76,6 +76,9 @@ async def main():
     await hass.services.async_call("calendar", "create_event", {
         "summary": "Nasi (opa en oma)", "start_date_time": f"{morgen.isoformat()} 17:00:00",
         "end_date_time": f"{morgen.isoformat()} 18:00:00"}, target={"entity_id": "calendar.eet_planning"}, blocking=True)
+    await hass.services.async_call("calendar", "create_event", {
+        "summary": "Papier", "start_date": morgen.isoformat(), "end_date": (morgen + timedelta(days=1)).isoformat()},
+        target={"entity_id": "calendar.eet_planning"}, blocking=True)
 
     # nep-AI-taak
     vragen = []
@@ -89,8 +92,8 @@ async def main():
             uit = []
             recepten.sort(key=lambda r: r["naam"] != "Linzensoep")
             for n, d in enumerate([d for d in dagen if not d.get("vast")] and dagen):
-                if d.get("vast"):
-                    uit.append({"datum": d["datum"], "titel": d["vast"], "kookt": "opa", "boodschappen": False})
+                if d.get("vast") or d.get("agenda"):
+                    uit.append({"datum": d["datum"], "titel": d.get("vast") or d["agenda"], "kookt": "opa", "boodschappen": False})
                 else:
                     rec = recepten[sum(1 for x in uit if x.get("recept_id")) % len(recepten)]
                     uit.append({"datum": d["datum"], "recept_id": rec["id"], "titel": rec["naam"], "kookt": "Papa",
@@ -141,17 +144,19 @@ async def main():
 
     # agenda teruglezen: los event zichtbaar
     await e.sync(forceer=True)
-    check([x["titel"] for x in e.extern] == ["Nasi (opa en oma)"], "los agenda-event zichtbaar als extern")
+    check([x["titel"] for x in e.extern] == ["Nasi (opa en oma)"], "los agenda-event zichtbaar, hele-dag-event genegeerd")
 
     # weekmenu voorstellen voor 3 dagen vanaf morgen
     await e.voorstel_maken(morgen.isoformat(), 3, "iets met soep")
     v = e.s["voorstel"]
-    check(len(v["dagen"]) == 3 and v["dagen"][0]["vast"] and not v["dagen"][0]["boodschappen"], "vaste dag blijft vast")
+    d0 = v["dagen"][0]
+    check(len(v["dagen"]) == 3 and d0["agenda"] == "Nasi (opa en oma)" and d0["vervangt"] and not d0["boodschappen"],
+          "agenda-idee meegegeven en wordt vervangen")
     e.voorstel_wijzig(v["dagen"][2]["datum"], {"recept_id": rid2, "porties": 4})
     check(e.s["voorstel"]["dagen"][2]["titel"] == "Wraps", "dag in voorstel gewijzigd")
     STATE["log"].clear()
     res = await e.voorstel_goedkeuren()
-    check(res["gepland"] == 2, f"2 dagen gepland ({res})")
+    check(res["gepland"] == 3, f"3 dagen gepland ({res})")
     adds = [l[1] for l in STATE["log"] if l[0] == "add"]
     print("   op lijst:", [(a.get("product_id"), a.get("amount"), a.get("note")) for a in adds])
     # Linzensoep 8 porties = 2x: uien 4 (1 in huis -> 3), paprika 4; wraps 1
@@ -167,11 +172,11 @@ async def main():
     evs = events["calendar.eet_planning"]["events"]
     print("   agenda:", [(x["start"], x["summary"]) for x in evs])
     eigen = [x for x in evs if "eten:" in (x.get("description") or "")]
-    check(len(eigen) == 2 and all("17:00" in x["start"] for x in eigen), "2 events om 17:00 met kenmerk")
+    check(len(eigen) == 3 and len([x for x in evs if "17:00" in x["start"]]) == 3, "3 events om 17:00 met kenmerk, los event vervangen")
     check(all(p.get("uid") for p in e.s["planning"]), "uid van events opgeslagen")
-    check("Porties: 8 (4 naar de vriezer)" in eigen[0]["description"], "beschrijving met porties/vriezer")
+    check(any("Porties: 8 (4 naar de vriezer)" in x["description"] for x in eigen), "beschrijving met porties/vriezer")
 
-    # in de agenda verschuiven: event van dag 2 naar dag 5
+    # in de agenda verschuiven: eerste maaltijd naar dag 5
     plan = sorted(e.s["planning"], key=lambda p: p["datum"])[0]
     ent = hass.data["calendar"].get_entity("calendar.eet_planning")
     nieuwe_dag = VANDAAG + timedelta(days=5)
@@ -188,6 +193,11 @@ async def main():
     check(all(p["id"] != tweede["id"] for p in e.s["planning"]), "verwijdering in agenda overgenomen")
 
     # los event overnemen en koppelen aan recept
+    overmorgen = VANDAAG + timedelta(days=2)
+    await hass.services.async_call("calendar", "create_event", {
+        "summary": "Soep", "start_date_time": f"{(VANDAAG + timedelta(days=8)).isoformat()} 17:00:00",
+        "end_date_time": f"{(VANDAAG + timedelta(days=8)).isoformat()} 18:00:00"}, target={"entity_id": "calendar.eet_planning"}, blocking=True)
+    await e.sync(forceer=True)
     los = e.extern[0]
     pid = (await e.overnemen(los["datum"], los["uid"], rid, None))["id"]
     await e.sync(forceer=True)
@@ -198,6 +208,14 @@ async def main():
     oude_uid = p["uid"]
     await e.plan(p["datum"], {"recept_id": rid2}, pid)
     check(p["titel"] == "Wraps" and p["uid"] and p["uid"] != oude_uid, "recept gewisseld, event vervangen")
+
+    # historie (zonder agenda)
+    n = e.historie([{"datum": (VANDAAG - timedelta(days=20)).isoformat(), "recept_id": rid},
+                    {"datum": (VANDAAG - timedelta(days=21)).isoformat(), "recept_id": "bestaat-niet"}])
+    lr = next(x for x in ws.eten_payload(c)["recepten"] if x["id"] == rid)
+    check(n == 1 and lr["laatst"] == (VANDAAG - timedelta(days=20)).isoformat(), "historie vastgelegd")
+    await e.sync(forceer=True)
+    check(any(p.get("historie") for p in e.s["planning"]), "historie blijft na sync")
 
     # beoordelen
     e.beoordeel(pid, "A", 5)

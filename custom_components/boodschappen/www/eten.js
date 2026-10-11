@@ -303,6 +303,7 @@ class EtenPanel extends HTMLElement {
       <label class="veld"><span>Gerecht</span>
         <select data-vs="recept_id">${this._receptOpties(vs.recept_id)}</select></label>
       ${!vs.recept_id ? `<label class="veld"><span>Titel</span><input data-vs="titel" value="${esc(vs.titel)}"></label>` : ""}
+      ${vs.agenda ? `<p class="reden">In de agenda stond: ${esc(vs.agenda)}</p>` : ""}
       ${vs.reden ? `<p class="reden">${esc(vs.reden)}</p>` : ""}
       <div class="rij3">
         <label class="veld"><span>Kookt</span><input data-vs="kookt" value="${esc(vs.kookt || "")}"></label>
@@ -644,7 +645,7 @@ class EtenPanel extends HTMLElement {
         this.edit = null;
         if (b.dataset.uid !== undefined && !b.dataset.id)
           return this._do({ type: "boodschappen/eten_overnemen", datum: b.dataset.datum, uid: b.dataset.uid || null,
-            recept_id: velden.recept_id, titel: velden.titel }, "Agenda bijwerken…");
+            recept_id: velden.recept_id, titel: velden.titel, velden }, "Agenda bijwerken…");
         return this._do({ type: "boodschappen/eten_plan", datum: b.dataset.datum, plan_id: b.dataset.id || null, velden }, "Agenda bijwerken…");
       }
       case "planweg":

@@ -252,8 +252,12 @@ async def _e_plan_weg(e, msg):
 
 
 async def _e_overnemen(e, msg):
-    item = await e.overnemen(msg["datum"], msg.get("uid"), msg.get("recept_id"), msg.get("titel"))
+    item = await e.overnemen(msg["datum"], msg.get("uid"), msg.get("recept_id"), msg.get("titel"), msg.get("velden"))
     return item["id"]
+
+
+async def _e_historie(e, msg):
+    return e.historie(msg["items"])
 
 
 async def _e_lijst(e, msg):
@@ -294,7 +298,9 @@ ETEN_COMMANDS = [
       vol.Optional("velden"): dict}, _e_plan, False),
     ({vol.Required("type"): "boodschappen/eten_plan_weg", vol.Required("plan_id"): str}, _e_plan_weg, False),
     ({vol.Required("type"): "boodschappen/eten_overnemen", vol.Required("datum"): str, vol.Optional("uid"): vol.Any(None, str),
-      vol.Optional("recept_id"): vol.Any(None, str), vol.Optional("titel"): vol.Any(None, str)}, _e_overnemen, False),
+      vol.Optional("recept_id"): vol.Any(None, str), vol.Optional("titel"): vol.Any(None, str),
+      vol.Optional("velden"): dict}, _e_overnemen, False),
+    ({vol.Required("type"): "boodschappen/eten_historie", vol.Required("items"): [dict]}, _e_historie, False),
     ({vol.Required("type"): "boodschappen/eten_op_lijst", vol.Required("plan_ids"): [str]}, _e_lijst, False),
     ({vol.Required("type"): "boodschappen/eten_beoordeel", vol.Required("plan_id"): str, vol.Required("persoon"): str,
       vol.Optional("score"): vol.Any(None, vol.All(int, vol.Range(min=1, max=5))),
