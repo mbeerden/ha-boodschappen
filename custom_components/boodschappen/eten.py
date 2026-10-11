@@ -272,7 +272,8 @@ def dag_prompt(
         "- Volg de wens van de gebruiker; die gaat voor.\n"
         "- Past een recept uit de receptenlijst bij de wens, kies dat (recept_id, titel = naam, nieuw_recept null).\n"
         "- Past er geen, schrijf dan een nieuw, goed uitvoerbaar recept (recept_id null, nieuw_recept ingevuld, "
-        "titel = naam). Ingrediënten: product_id = id uit de productlijst dat je ervoor koopt (null als er niets "
+        "titel = naam). Ingrediënten: tekst altijd mét hoeveelheid (bijv. '2 uien', '400 g aardappelen', "
+        "'1 blik tomatenblokjes'); product_id = id uit de productlijst dat je ervoor koopt (null als er niets "
         "past); aantal = verpakkingen/stuks voor de porties van het recept; basis=true voor wat altijd in huis is "
         "(zout, peper, olie, water, gedroogde kruiden). Stappen kort, één handeling per stap.\n"
         "- Houd rekening met de huisregels (wie kookt en wie eet mee op deze weekdag, dieetwensen) en kies niet "
@@ -540,6 +541,9 @@ class Eten:
             raise ValueError("Er is geen voorstel")
         for d in v["dagen"]:
             if d["datum"] == datum:
+                if isinstance(velden.get("concept"), dict):
+                    # (bewerkt) nieuw recept bij deze dag; komt pas bij goedkeuren in de bibliotheek
+                    d["concept"] = schoon_recept(velden["concept"], {"id": velden["concept"].get("id") or nieuw_id()})
                 if "recept_id" in velden:
                     rid = velden["recept_id"] or None
                     concept = d.get("concept")
@@ -550,7 +554,7 @@ class Eten:
                         d["recept_id"] = rid if rid in self.s["recepten"] else None
                         if d["recept_id"]:
                             d["titel"] = self.s["recepten"][rid]["naam"]
-                for k in ("titel", "kookt", "porties", "vriezer", "boodschappen", "overslaan"):
+                for k in ("titel", "kookt", "porties", "vriezer", "boodschappen", "overslaan", "reden", "wens"):
                     if k in velden and not (k == "titel" and d.get("recept_id") and "recept_id" not in velden):
                         d[k] = velden[k]
         self.save()

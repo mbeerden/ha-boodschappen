@@ -283,6 +283,12 @@ async def main():
           "voorstel-dag vervangen door nieuw recept (nog niet in bibliotheek)")
     check("nieuw" in vd["concept"]["tags"] and vd["wens"] == "een vegetarische goulash", "concept met label nieuw en wens")
     e.voorstel_wijzig(dag12, {"porties": 5})
+    # concept herstellen/bewerken via wijzig
+    c2 = {**vd["concept"], "stappen": ["Snijd", "Stoof 45 min"]}
+    e.voorstel_wijzig(dag12, {"concept": c2, "recept_id": c2["id"], "wens": "x"})
+    vd = next(x for x in e.s["voorstel"]["dagen"] if x["datum"] == dag12)
+    check(vd["concept"]["id"] == cid and vd["concept"]["stappen"][1] == "Stoof 45 min" and vd["recept_id"] == cid,
+          "concept via wijzig te herstellen")
     STATE["log"].clear()
     await e.voorstel_goedkeuren()
     p12 = next(p for p in e.s["planning"] if p["datum"] == dag12)
