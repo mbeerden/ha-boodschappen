@@ -43,6 +43,7 @@ def payload(c) -> dict[str, Any]:
         })
     return {
         "lists": [{"id": lid, "name": l["name"]} for lid, l in sorted(d.lists.items())],
+        "winkels": c.producten.winkels() if hasattr(c, "producten") else [],
         "groups": [{"id": gid, "name": g["name"]} for gid, g in sorted(d.groups.items(), key=lambda x: x[1]["name"])],
         "products": sorted(
             [{"id": pid, "name": p["name"], "group_id": p.get("product_group_id"), "list_id": d.list_for_product(pid)}
@@ -151,6 +152,28 @@ async def _bon_herkoppel(c, msg):
                           msg.get("totaal"))
 
 
+async def _p_raden(c, msg):
+    return await c.producten.raden(msg["naam"])
+
+
+async def _p_nieuw(c, msg):
+    return await c.producten.nieuw(msg["naam"], msg.get("group_id"), msg.get("winkel_id"),
+                                   float(msg.get("amount") or 1), msg.get("item_id"))
+
+
+async def _p_details(c, msg):
+    return await c.producten.details(int(msg["product_id"]))
+
+
+async def _p_opslaan(c, msg):
+    await c.producten.opslaan(int(msg["product_id"]), msg["velden"])
+    return await c.producten.details(int(msg["product_id"]))
+
+
+async def _p_op(c, msg):
+    await c.producten.op(int(msg["product_id"]))
+
+
 COMMANDS = [
     ({vol.Required("type"): "boodschappen/data"}, _data),
     ({vol.Required("type"): "boodschappen/item_add", vol.Required("list_id"): int,
@@ -163,6 +186,13 @@ COMMANDS = [
     ({vol.Required("type"): "boodschappen/tekorten"}, _tekorten),
     ({vol.Required("type"): "boodschappen/favoriet", vol.Required("product_id"): int,
       vol.Required("actie"): vol.In(["vast", "verberg", "reset"])}, _favoriet),
+    ({vol.Required("type"): "boodschappen/product_raden", vol.Required("naam"): str}, _p_raden),
+    ({vol.Required("type"): "boodschappen/product_nieuw", vol.Required("naam"): str, vol.Optional("group_id"): vol.Any(None, int),
+      vol.Optional("winkel_id"): vol.Any(None, int), vol.Optional("amount"): vol.Coerce(float),
+      vol.Optional("item_id"): vol.Any(None, int)}, _p_nieuw),
+    ({vol.Required("type"): "boodschappen/product_details", vol.Required("product_id"): int}, _p_details),
+    ({vol.Required("type"): "boodschappen/product_opslaan", vol.Required("product_id"): int, vol.Required("velden"): dict}, _p_opslaan),
+    ({vol.Required("type"): "boodschappen/product_op", vol.Required("product_id"): int}, _p_op),
     ({vol.Required("type"): "boodschappen/aanbieding_negeer", vol.Required("key"): str}, _aanb_negeer),
     ({vol.Required("type"): "boodschappen/aanbiedingen_ververs"}, _aanb_ververs),
     ({vol.Required("type"): "boodschappen/bon_koppel", vol.Required("queue_id"): str, vol.Required("product_id"): int,

@@ -111,6 +111,47 @@ def fake_grocy():
         STATE["log"].append(("new-product", body["name"]))
         return web.json_response({"created_object_id": "500"})
 
+    async def product_get(req):
+        auth(req)
+        pid = int(req.match_info["id"])
+        p = next((x for x in PRODUCTS if x["id"] == pid), None)
+        return web.json_response({**p, "min_stock_amount": STATE.setdefault("min", {}).get(pid, 0)} if p else None)
+
+    async def product_put(req):
+        auth(req)
+        pid = int(req.match_info["id"])
+        body = await req.json()
+        for x in PRODUCTS:
+            if x["id"] == pid:
+                if "name" in body: x["name"] = body["name"]
+                if "shopping_location_id" in body: x["shopping_location_id"] = body["shopping_location_id"]
+                if "product_group_id" in body: x["product_group_id"] = body["product_group_id"]
+        if "min_stock_amount" in body:
+            STATE.setdefault("min", {})[pid] = body["min_stock_amount"]
+        STATE["log"].append(("product-put", pid, body))
+        return web.Response(status=204)
+
+    async def userfields(req):
+        auth(req)
+        STATE["log"].append(("userfields", int(req.match_info["id"]), await req.json()))
+        return web.Response(status=204)
+
+    async def stock_get(req):
+        auth(req)
+        return web.json_response({"stock_amount": STATE.setdefault("voorraad", {}).get(int(req.match_info["id"]), 0)})
+
+    async def inventory(req):
+        auth(req)
+        body = await req.json()
+        STATE.setdefault("voorraad", {})[int(req.match_info["id"])] = body["new_amount"]
+        STATE["log"].append(("inventory", int(req.match_info["id"]), body["new_amount"]))
+        return web.json_response([{"transaction_id": "inv"}])
+
+    app.router.add_get("/api/objects/products/{id}", product_get)
+    app.router.add_put("/api/objects/products/{id}", product_put)
+    app.router.add_put("/api/userfields/products/{id}", userfields)
+    app.router.add_get("/api/stock/products/{id}", stock_get)
+    app.router.add_post("/api/stock/products/{id}/inventory", inventory)
     stock_log_ref[0] = stock_log
     app.router.add_get("/api/stock/products/{id}/entries", entries)
     app.router.add_put("/api/stock/entry/{id}", put_entry)
@@ -217,6 +258,22 @@ async def main():
     STATE["log"].clear()
     await c.bon.herkoppel_nieuw(bon["id"], kk["id"], "Snackkomkommer", 2, 1, None)
     print("NIEUW", kk["grocy_naam"], kk["product_id"], [l[0] for l in STATE["log"]])
+    # --- producten: nieuw, details, op ---
+    STATE["log"].clear()
+    STATE["voorraad"] = {65: 0}
+    tekst_id = next(i.id for i in c.data.items if not i.product_id)
+    pid = await c.producten.nieuw("Mozzarella (bol)", 6, 1, 1, tekst_id)
+    await c.async_refresh()
+    print("NIEUWPROD", pid, [(i.name, i.list_id, i.amount) for i in c.data.items if i.product_id == pid],
+          any(i.id == tekst_id for i in c.data.items))
+    det = await c.producten.details(65)
+    await c.producten.opslaan(65, {"min_stock": 0, "voorraad": 1, "wekelijks": 2, "winkel_id": 2, "name": "Koffie (bonen)"})
+    det2 = await c.producten.details(65)
+    print("DETAILS", det["voorraad"], "->", det2["voorraad"], det2["min_stock"], det2["winkel_id"], det2["name"],
+          [l[0] for l in STATE["log"] if l[0] in ("product-put", "userfields", "inventory")])
+    await c.producten.op(65)
+    await c.async_refresh()
+    print("OP", STATE["voorraad"][65], [(i.name, i.list_id, i.note) for i in c.data.items if i.product_id == 65 and not i.done])
     notes = [s.attributes.get("title") for s in hass.states.async_all("persistent_notification")]
     print("NOTIF", hass.states.async_entity_ids("persistent_notification")[:3], notes[:2])
     print("GROCY-LOG:")

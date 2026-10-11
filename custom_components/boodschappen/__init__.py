@@ -22,6 +22,7 @@ from .api import GrocyApi, GrocyError, build_base_url
 from .aanbiedingen import Aanbiedingen
 from .bon import BonVerwerker
 from .eten import Eten
+from .producten import Producten
 from .const import (
     CONF_API_KEY,
     CONF_PORT,
@@ -41,7 +42,7 @@ SERVICE_AANBIEDINGEN = "aanbiedingen_verversen"
 PANEL_URL = "boodschappen"
 ETEN_URL = "eten"
 STATIC_URL = "/boodschappen_static"
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 BON_SCHEMA = vol.Schema(
     {
@@ -81,6 +82,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
     coordinator.bon = BonVerwerker(coordinator)
     coordinator.aanbiedingen = Aanbiedingen(coordinator)
+    coordinator.producten = Producten(coordinator)
     coordinator.eten = Eten(coordinator, entry.entry_id)
     await coordinator.eten.async_load()
     entry.runtime_data = coordinator

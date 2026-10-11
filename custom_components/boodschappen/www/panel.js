@@ -86,7 +86,7 @@ class BoodschappenPanel extends HTMLElement {
 
   _poll() {
     const a = this.shadowRoot.activeElement;
-    if (this.busy || (a && (a.tagName === "INPUT" || a.tagName === "SELECT"))) return;
+    if (this.busy || this.modal || (a && (a.tagName === "INPUT" || a.tagName === "SELECT"))) return;
     this._load();
   }
 
@@ -137,7 +137,8 @@ class BoodschappenPanel extends HTMLElement {
       </header>
       <nav class="tabs" role="tablist"></nav>
       <div class="bar"></div>
-      <div class="main"></div>`;
+      <div class="main"></div>
+      <div class="modal" hidden></div>`;
     const menu = document.createElement("ha-menu-button");
     menu.hass = this._hass;
     menu.narrow = this._narrow;
@@ -309,6 +310,11 @@ class BoodschappenPanel extends HTMLElement {
 
   _item(i) {
     const note = i.note ? `<small>${esc(i.note)}</small>` : "";
+    const extra = i.done
+      ? ""
+      : i.product_id
+      ? `<button class="info" data-act="info" data-pid="${i.product_id}" aria-label="Details van ${esc(i.name)}" title="Productdetails">ⓘ</button>`
+      : `<button class="info nieuw" data-act="maakprod" data-id="${i.id}" data-naam="${esc(i.name)}" aria-label="Maak product van ${esc(i.name)}" title="Product aanmaken (vak en winkel)">+</button>`;
     return `<li class="item ${i.done ? "done" : ""}">
       <button class="vink" data-act="vink" data-id="${i.id}" data-done="${i.done ? 0 : 1}" aria-pressed="${i.done}"
         aria-label="${esc(i.name)} ${i.done ? "terugzetten" : "afvinken"}">
@@ -323,7 +329,7 @@ class BoodschappenPanel extends HTMLElement {
               <span class="n">${fmtNum(i.amount)}</span>
               <button data-act="plus" data-id="${i.id}" data-amount="${i.amount}" aria-label="Meer ${esc(i.name)}">+</button>
             </span>`
-      }
+      }${extra}
     </li>`;
   }
 
@@ -433,9 +439,12 @@ class BoodschappenPanel extends HTMLElement {
     if (!box) return;
     const q = val.replace(/^\s*\d+([.,]\d+)?\s*x?\s*/i, "");
     const res = q.length >= 2 ? zoek(this.data.products, q, 5) : [];
-    box.innerHTML = res
-      .map((p) => `<button role="option" data-act="sugg" data-pid="${p.id}">${esc(p.name)}</button>`)
-      .join("");
+    const exact = res.some((p) => norm(p.name) === norm(q));
+    box.innerHTML =
+      res.map((p) => `<button role="option" data-act="sugg" data-pid="${p.id}">${esc(p.name)}</button>`).join("") +
+      (q.trim().length >= 2 && !exact
+        ? `<button class="nieuwprod" data-act="nieuwprod" data-naam="${esc(q.trim())}">+ Nieuw product: ${esc(q.trim())}</button>`
+        : "");
   }
 
   _input(e) {
@@ -473,6 +482,133 @@ class BoodschappenPanel extends HTMLElement {
     this.shadowRoot.getElementById("add")?.focus();
   }
 
+  // ---------------------------------------------------------------- productvensters
+  _opties(lijst, gekozen, leeg) {
+    return (leeg ? `<option value="">${esc(leeg)}</option>` : "") +
+      lijst.map((x) => `<option value="${x.id}" ${Number(gekozen) === Number(x.id) ? "selected" : ""}>${esc(x.label || x.name)}</option>`).join("");
+  }
+
+  _toonModal(html) {
+    const m = this.shadowRoot.querySelector(".modal");
+    m.innerHTML = `<div class="venster" role="dialog" aria-modal="true">${html}</div>`;
+    m.hidden = false;
+    m.onclick = (e) => {
+      if (e.target === m) this._sluitModal();
+    };
+  }
+
+  _sluitModal() {
+    this.modal = null;
+    const m = this.shadowRoot.querySelector(".modal");
+    m.hidden = true;
+    m.innerHTML = "";
+  }
+
+  _groepen() {
+    return this.data.groups.map((g) => ({ id: g.id, label: vakNaam(g.name) }));
+  }
+
+  async _openNieuw(naam, itemId, amount) {
+    this.modal = { soort: "nieuw", itemId, amount };
+    const winkels = this.data.winkels || [];
+    const lijstWinkel = winkels.find((w) => norm(w.name) === norm(this.data.lists.find((l) => String(l.id) === this.tab)?.name));
+    this._toonModal(`
+      <h2>Nieuw product</h2>
+      <label class="veld">Naam <input class="m-naam" type="text" value="${esc(naam)}"></label>
+      <label class="veld">Vak (looproute) <select class="m-groep">${this._opties(this._groepen(), null, "— kies een vak —")}</select></label>
+      <label class="veld">Winkel <select class="m-winkel">${this._opties(winkels, lijstWinkel?.id)}</select></label>
+      <label class="veld klein">Aantal <input class="m-aantal" type="number" min="0.5" step="any" inputmode="decimal" value="${fmtNum(amount || 1)}"></label>
+      <p class="hint m-ai"><span class="spin" aria-hidden="true"></span> Gemini zoekt vak en winkel…</p>
+      <div class="knoppen"><span class="vul"></span>
+        <button class="sec-btn" data-act="modsluit">Annuleren</button>
+        <button class="primary" data-act="nieuwmaak">${itemId ? "Product maken" : "Toevoegen"}</button></div>`);
+    this.shadowRoot.querySelector(".m-naam").focus();
+    const m = this.shadowRoot.querySelector(".modal");
+    let aangeraakt = false;
+    m.querySelectorAll("select").forEach((s) => s.addEventListener("change", () => (aangeraakt = true)));
+    try {
+      const r = await this._hass.callWS({ type: "boodschappen/product_raden", naam });
+      const g = r.resultaat || {};
+      if (this.modal?.soort !== "nieuw") return;
+      if (!aangeraakt) {
+        if (g.group_id) m.querySelector(".m-groep").value = String(g.group_id);
+        if (g.winkel_id) m.querySelector(".m-winkel").value = String(g.winkel_id);
+      }
+      const n = m.querySelector(".m-naam");
+      if (g.naam && n.value.trim().toLowerCase() === naam.trim().toLowerCase()) n.value = g.naam;
+      m.querySelector(".m-ai").textContent = g.group_id ? "Voorstel van Gemini; pas aan als het niet klopt." : "Kies het vak en de winkel.";
+    } catch (_) {
+      const h = m.querySelector(".m-ai");
+      if (h) h.textContent = "Kies het vak en de winkel.";
+    }
+  }
+
+  async _nieuwMaak() {
+    const m = this.shadowRoot.querySelector(".modal");
+    const naam = m.querySelector(".m-naam").value.trim();
+    const group = Number(m.querySelector(".m-groep").value) || null;
+    if (!naam) return m.querySelector(".m-naam").focus();
+    if (!group) return m.querySelector(".m-groep").focus();
+    const msg = { type: "boodschappen/product_nieuw", naam, group_id: group, winkel_id: Number(m.querySelector(".m-winkel").value) || null,
+      amount: Number(String(m.querySelector(".m-aantal").value).replace(",", ".")) || 1, item_id: this.modal.itemId || null };
+    this._sluitModal();
+    await this._do(msg);
+  }
+
+  async _openDetails(pid) {
+    this.modal = { soort: "details", pid };
+    this._toonModal(`<p class="hint"><span class="spin" aria-hidden="true"></span> Laden…</p>`);
+    let p;
+    try {
+      const r = await this._hass.callWS({ type: "boodschappen/product_details", product_id: pid });
+      p = r.resultaat;
+    } catch (e) {
+      this._toonModal(`<p class="fout">${esc(e.message || "Laden mislukt")}</p><div class="knoppen"><span class="vul"></span><button class="sec-btn" data-act="modsluit">Sluiten</button></div>`);
+      return;
+    }
+    if (this.modal?.pid !== pid) return;
+    this._toonModal(`
+      <h2>${esc(p.name)}</h2>
+      <label class="veld">Naam <input class="d-naam" type="text" value="${esc(p.name)}"></label>
+      <label class="veld">Vak (looproute) <select class="d-groep">${this._opties(this._groepen(), p.group_id, "— geen —")}</select></label>
+      <label class="veld">Winkel <select class="d-winkel">${this._opties(this.data.winkels || [], p.winkel_id, "— geen —")}</select></label>
+      <div class="rij3">
+        <label class="veld klein">In huis <input class="d-voorraad" type="number" min="0" step="any" inputmode="decimal" value="${fmtNum(p.voorraad)}" data-oud="${p.voorraad}"></label>
+        <label class="veld klein">Minimum <input class="d-min" type="number" min="0" step="any" inputmode="decimal" value="${fmtNum(p.min_stock)}"></label>
+        <label class="veld klein">Elke week <input class="d-week" type="number" min="0" step="any" inputmode="decimal" value="${fmtNum(p.wekelijks)}"></label>
+      </div>
+      <p class="hint">Minimum: komt bij "Tekorten aanvullen" op de lijst zodra er minder in huis is. Zet op 0 als je het alleen zelf toevoegt.
+        Elke week: vaste hoeveelheid voor "Vaste verse boodschappen".</p>
+      <div class="knoppen">
+        <button class="sec-btn" data-act="detop" title="Voorraad op 0 en op de lijst zetten">Op</button>
+        <span class="vul"></span>
+        <button class="sec-btn" data-act="modsluit">Annuleren</button>
+        <button class="primary" data-act="detsave">Opslaan</button></div>`);
+  }
+
+  async _detailsOpslaan() {
+    const m = this.shadowRoot.querySelector(".modal");
+    const num = (sel) => Number(String(m.querySelector(sel).value).replace(",", ".")) || 0;
+    const v = m.querySelector(".d-voorraad");
+    const velden = {
+      name: m.querySelector(".d-naam").value.trim(),
+      group_id: Number(m.querySelector(".d-groep").value) || null,
+      winkel_id: Number(m.querySelector(".d-winkel").value) || null,
+      min_stock: num(".d-min"),
+      wekelijks: num(".d-week"),
+    };
+    if (v.value !== "" && Number(String(v.value).replace(",", ".")) !== Number(v.dataset.oud)) velden.voorraad = num(".d-voorraad");
+    const pid = this.modal.pid;
+    this._sluitModal();
+    await this._do({ type: "boodschappen/product_opslaan", product_id: pid, velden });
+  }
+
+  async _detailsOp() {
+    const pid = this.modal.pid;
+    this._sluitModal();
+    await this._do({ type: "boodschappen/product_op", product_id: pid });
+  }
+
   async _click(e) {
     const b = e.target.closest("button");
     if (!b) return;
@@ -490,6 +626,25 @@ class BoodschappenPanel extends HTMLElement {
     }
     const id = Number(b.dataset.id);
     switch (act) {
+      case "nieuwprod": {
+        const inp = this.shadowRoot.getElementById("add");
+        const m = (inp?.value || "").match(/^\s*(\d+(?:[.,]\d+)?)/);
+        if (inp) inp.value = "";
+        this._suggest("");
+        return this._openNieuw(b.dataset.naam, null, m ? Number(m[1].replace(",", ".")) : 1);
+      }
+      case "maakprod":
+        return this._openNieuw(b.dataset.naam, id, 1);
+      case "info":
+        return this._openDetails(Number(b.dataset.pid));
+      case "modsluit":
+        return this._sluitModal();
+      case "nieuwmaak":
+        return this._nieuwMaak();
+      case "detsave":
+        return this._detailsOpslaan();
+      case "detop":
+        return this._detailsOp();
       case "add":
         return this._add();
       case "sugg":
@@ -596,7 +751,7 @@ class BoodschappenPanel extends HTMLElement {
 
 const CSS = `
 :host {
-  display: flex; flex-direction: column; height: 100%;
+  display: flex; flex-direction: column; height: 100%; position: relative;
   background: var(--primary-background-color); color: var(--primary-text-color);
   font-family: var(--paper-font-body1_-_font-family, Roboto, system-ui, sans-serif);
   --route: var(--primary-color);
@@ -683,6 +838,27 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; }
 .mandje .kop b { font-size: 12px; padding: 2px 8px; border-radius: 10px; background: var(--zacht); }
 .mandje .item { box-shadow: none; background: transparent; min-height: 48px; }
 .wis { color: var(--error-color, #c62828); border-color: color-mix(in srgb, var(--error-color, #c62828) 40%, transparent); }
+
+/* Productvensters */
+.info { flex: none; width: 36px; height: 44px; margin-right: 4px; border-radius: 10px; font-size: 18px; color: var(--secondary-text-color); }
+.info.nieuw { font-size: 22px; color: var(--route); font-weight: 600; }
+.info:active { background: var(--zacht); }
+.sugg .nieuwprod { border-style: dashed; color: var(--route); font-weight: 500; }
+.modal { position: absolute; inset: 0; z-index: 10; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; justify-content: center; }
+.modal[hidden] { display: none; }
+.venster { width: 100%; max-width: 520px; max-height: 90%; overflow-y: auto; background: var(--card-background-color);
+  border-radius: 18px 18px 0 0; padding: 16px 16px 20px; display: grid; gap: 10px; box-shadow: 0 -4px 20px rgba(0,0,0,.25); }
+@media (min-width: 700px) { .modal { align-items: center; } .venster { border-radius: 18px; } }
+.venster h2 { margin: 0 0 2px; font-size: 19px; font-weight: 500; }
+.venster .rij3 { display: flex; gap: 8px; flex-wrap: wrap; }
+.venster .rij3 .veld { flex: 1; min-width: 90px; }
+.venster .rij3 .veld input { width: 100%; }
+.venster .knoppen { margin-top: 4px; align-items: center; }
+.venster .vul { flex: 1; }
+.venster .primary { padding: 0 20px; }
+.spin { display: inline-block; width: 14px; height: 14px; vertical-align: -2px; margin-right: 6px; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--route) 25%, transparent); border-top-color: var(--route); animation: draai .8s linear infinite; }
+@keyframes draai { to { transform: rotate(360deg); } }
 
 /* Aanbiedingen */
 .deals { margin-top: 14px; border-top: 1px solid var(--rand); padding-top: 4px; }
