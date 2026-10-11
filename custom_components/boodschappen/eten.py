@@ -690,6 +690,7 @@ class Eten:
             item = {"id": nieuw_id(), "datum": datum, "uid": None, "op_lijst": False}
             self.s["planning"].append(item)
         oud_recept = item.get("recept_id")
+        oud_bs = item.get("boodschappen", True)
         item["datum"] = datum
         for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen", "notitie", "geen"):
             if k in velden:
@@ -702,8 +703,8 @@ class Eten:
             item["titel"] = self.s["recepten"][item["recept_id"]]["naam"]
         else:
             item["recept_id"] = None
-        if item.get("recept_id") != oud_recept:
-            item["op_lijst"] = False
+        if item.get("recept_id") != oud_recept or (item.get("boodschappen", True) and not oud_bs):
+            item["op_lijst"] = False  # ander recept, of boodschappen later alsnog aangezet
         item.setdefault("boodschappen", True)
         item.pop("historie", None)
         if not item.get("uid"):

@@ -359,6 +359,19 @@ async def main():
     check(p18["titel"] == "Vega goulash" and not any(x["datum"] == dag18 for x in e.extern), "toegepast, los idee vervangen")
     await e.plan_verwijderen(p18["id"])
 
+    # --- boodschappen eerst uit, later alsnog aan ---
+    dag20 = (VANDAAG + timedelta(days=20)).isoformat()
+    await e.voorstel_maken(dag20, 1, "")
+    rid20 = e.recept_opslaan({"naam": "Worteltaart", "porties": 4, "ingredienten": [{"tekst": "1 kg wortels", "product_id": 42, "aantal": 1}]})
+    e.voorstel_wijzig(dag20, {"recept_id": rid20, "boodschappen": False})
+    STATE["log"].clear()
+    await e.voorstel_goedkeuren()
+    check(not [l for l in STATE["log"] if l[0] == "add"], "boodschappen uit: niets op de lijst")
+    p20 = next(p for p in e.s["planning"] if p["datum"] == dag20)
+    await e.plan(dag20, {"boodschappen": True, "lijst": True}, p20["id"])
+    check([l for l in STATE["log"] if l[0] == "add"], "boodschappen later aan: ingrediënten alsnog op de lijst")
+    await e.plan_verwijderen(p20["id"])
+
     # --- geen maaltijd ---
     dag16 = (VANDAAG + timedelta(days=16)).isoformat()
     STATE["log"].clear()
