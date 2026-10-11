@@ -15,6 +15,7 @@ from custom_components.boodschappen.eten import (  # noqa: E402
     schoon_recept,
     week_start,
     weekmenu_prompt,
+    weekdag_fouten,
 )
 
 
@@ -105,6 +106,15 @@ def test_jsonld():
     assert "Porties: 4 personen" in t and "- 250 g rode linzen" in t
     assert "1. Fruit de ui." in t and "2. Kook de linzen & mix." in t
     assert recept_uit_jsonld("<html>geen recept</html>") is None
+
+
+def test_weekdag_fouten():
+    dagen = [{"datum": "2026-10-12", "dag": "maandag"}, {"datum": "2026-10-13", "dag": "dinsdag"}]
+    goed = [{"datum": "2026-10-12", "dag": "maandag"}, {"datum": "2026-10-13", "dag": "Dinsdag"}]
+    assert weekdag_fouten(goed, dagen) == ""
+    fout = weekdag_fouten([{"datum": "2026-10-12", "dag": "zondag"}, {"datum": "2026-10-13", "dag": "dinsdag"}], dagen)
+    assert "2026-10-12 is een maandag" in fout
+    assert "precies" in weekdag_fouten([{"datum": "2026-10-12", "dag": "maandag"}], dagen)
 
 
 def test_weekmenu_prompt_bevat_vaste_dagen():

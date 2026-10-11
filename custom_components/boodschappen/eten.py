@@ -204,18 +204,32 @@ def recept_prompt(bron: str, producten: list[dict]) -> str:
     )
 
 
+def dagen_tekst(dagen: list[dict]) -> str:
+    regels = []
+    for d in dagen:
+        r = f"- {d['dag'].upper()} {d['datum']}"
+        if d.get("vast"):
+            r += f" — vast: {d['vast']}"
+        elif d.get("agenda"):
+            r += f" — in de agenda staat: {d['agenda']}"
+        regels.append(r)
+    return "\n".join(regels)
+
+
 def weekmenu_prompt(
     dagen: list[dict],
     recepten: list[dict],
     huisregels: str,
     wens: str,
     vandaag: date,
+    correctie: str = "",
 ) -> str:
     return (
         "Je plant de avondmaaltijden van een gezin. Maak een voorstel voor de dagen hieronder.\n"
-        "Antwoord ALLEEN met een JSON-lijst, één object per dag:\n"
-        '[{"datum": "YYYY-MM-DD", "recept_id": str|null, "titel": str, "kookt": str, "porties": int, '
-        '"vriezer": int, "boodschappen": bool, "reden": str}]\n'
+        "Antwoord ALLEEN met een JSON-lijst, precies één object per te plannen dag, in dezelfde volgorde:\n"
+        '[{"datum": "YYYY-MM-DD", "dag": "maandag", "recept_id": str|null, "titel": str, "kookt": str, '
+        '"porties": int, "vriezer": int, "boodschappen": bool, "reden": str}]\n'
+        "- Neem datum én weekdag over zoals hieronder gegeven. Let goed op de weekdag: de huisregels gaan per weekdag.\n"
         "- Kies bij voorkeur recepten uit de receptenlijst (recept_id + titel = naam). Een nieuw gerecht mag "
         "(recept_id null), maar alleen als het echt iets toevoegt.\n"
         "- porties = alle porties die gekookt worden (incl. porties voor de vriezer); vriezer = hoeveel daarvan "
@@ -224,17 +238,35 @@ def weekmenu_prompt(
         "- Weeg mee: de huisregels, de beoordelingen per persoon (scores 1-5) van wie die dag mee-eet, "
         "afwisseling (niet hetzelfde als recent gegeten), en de bereidingstijd.\n"
         "- Dagen met 'vast' zijn al gepland: neem die titel over, kies geen ander gerecht.\n"
-        "- Dagen met 'agenda' hebben al een globaal idee in de agenda (bijv. 'Curry (voor 3x koken)' of "
+        "- Dagen waar al iets 'in de agenda staat' hebben een globaal idee (bijv. 'Curry (voor 3x koken)' of "
         "'Soep (uit de vriezer)'): houd je daaraan. Kies er een passend recept bij als dat er is, anders neem je "
         "de titel over. Bij 'uit de vriezer', een uitje of als iemand anders kookt: geen recept nodig en "
         "boodschappen=false.\n"
+        "- kookt: de naam van wie kookt, of leeg als er niet gekookt wordt.\n"
         "- reden: één korte zin waarom.\n\n"
-        f"Vandaag: {vandaag.isoformat()} ({DAGEN[vandaag.weekday()]})\n"
+        f"Vandaag: {DAGEN[vandaag.weekday()]} {vandaag.isoformat()}\n"
         f"Huisregels:\n{huisregels or '-'}\n\n"
         f"Wensen voor deze week: {wens or '-'}\n\n"
-        f"Te plannen dagen: {json.dumps(dagen, ensure_ascii=False)}\n\n"
-        f"Recepten: {json.dumps(recepten, ensure_ascii=False)}"
+        f"Te plannen dagen:\n{dagen_tekst(dagen)}\n\n"
+        + (f"LET OP, correctie op je vorige antwoord: {correctie}\n\n" if correctie else "")
+        + f"Recepten: {json.dumps(recepten, ensure_ascii=False)}"
     )
+
+
+def weekdag_fouten(res: list, dagen: list[dict]) -> str:
+    """Controleer of de AI de juiste weekdag bij elke datum gebruikt; geeft een correctietekst of ''."""
+    juist = {d["datum"]: d["dag"] for d in dagen}
+    fouten = []
+    for x in res:
+        if not isinstance(x, dict):
+            continue
+        iso = str(x.get("datum") or "")[:10]
+        dag = str(x.get("dag") or "").strip().lower()
+        if iso in juist and dag and dag != juist[iso]:
+            fouten.append(f"{iso} is een {juist[iso]}, niet een {dag}")
+    if {str(x.get("datum"))[:10] for x in res if isinstance(x, dict)} != set(juist):
+        fouten.append("geef precies de gevraagde datums terug")
+    return "; ".join(fouten)
 
 
 def recept_compact(r: dict, gem: dict | None, laatst: str | None) -> dict:
@@ -421,12 +453,18 @@ class Eten:
             if p.get("recept_id"):
                 laatst[p["recept_id"]] = max(laatst.get(p["recept_id"], ""), p["datum"])
         recepten = [recept_compact(r, gem.get(r["id"]), laatst.get(r["id"])) for r in self.s["recepten"].values()]
-        res = await self._vraag_ai(
-            "Eten: weekmenu voorstellen",
-            weekmenu_prompt(te_plannen, recepten, self.inst.get("huisregels", ""), wens, date.today()),
-        )
-        if not isinstance(res, list):
-            raise ValueError("De AI gaf geen bruikbaar weekmenu terug")
+        correctie = ""
+        for _poging in range(2):
+            res = await self._vraag_ai(
+                "Eten: weekmenu voorstellen",
+                weekmenu_prompt(te_plannen, recepten, self.inst.get("huisregels", ""), wens, date.today(), correctie),
+            )
+            if not isinstance(res, list):
+                raise ValueError("De AI gaf geen bruikbaar weekmenu terug")
+            correctie = weekdag_fouten(res, te_plannen)
+            if not correctie:
+                break
+            _LOGGER.info("Weekmenu: weekdagen klopten niet (%s), opnieuw", correctie)
         vast = {d["datum"]: d.get("vast") for d in te_plannen}
         vervangt: dict[str, list[str]] = {}
         for e in self.extern:
@@ -440,7 +478,8 @@ class Eten:
             rid = x.get("recept_id") if x.get("recept_id") in self.s["recepten"] else None
             titel = self.s["recepten"][rid]["naam"] if rid else str(x.get("titel") or "").strip()
             dagen_uit.append({
-                "datum": iso, "recept_id": rid, "titel": titel or "?", "kookt": x.get("kookt") or "",
+                "datum": iso, "recept_id": rid, "titel": titel or "?",
+                "kookt": "" if str(x.get("kookt") or "").strip().lower() in ("niemand", "-", "geen", "n.v.t.") else (x.get("kookt") or ""),
                 "porties": x.get("porties") or None, "vriezer": x.get("vriezer") or 0,
                 "boodschappen": bool(x.get("boodschappen", True)) and not vast[iso],
                 "reden": x.get("reden") or "", "vast": bool(vast[iso]),

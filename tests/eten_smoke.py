@@ -87,16 +87,23 @@ async def main():
         vragen.append(call.data["task_name"])
         instr = call.data["instructions"]
         if "weekmenu" in call.data["task_name"]:
-            dagen = json.loads(re.search(r"Te plannen dagen: (\[.*?\])\n", instr).group(1))
+            dagen = []
+            for m in re.finditer(r"^- ([A-Z]+) (\d{4}-\d{2}-\d{2})(?: — (vast|in de agenda staat): (.*))?$", instr, re.M):
+                d = {"datum": m.group(2), "dag": m.group(1).lower()}
+                if m.group(3) == "vast":
+                    d["vast"] = m.group(4)
+                elif m.group(3):
+                    d["agenda"] = m.group(4)
+                dagen.append(d)
             recepten = json.loads(re.search(r"Recepten: (\[.*\])$", instr, re.S).group(1))
             uit = []
             recepten.sort(key=lambda r: r["naam"] != "Linzensoep")
             for n, d in enumerate([d for d in dagen if not d.get("vast")] and dagen):
                 if d.get("vast") or d.get("agenda"):
-                    uit.append({"datum": d["datum"], "titel": d.get("vast") or d["agenda"], "kookt": "opa", "boodschappen": False})
+                    uit.append({"datum": d["datum"], "dag": d["dag"], "titel": d.get("vast") or d["agenda"], "kookt": "opa", "boodschappen": False})
                 else:
                     rec = recepten[sum(1 for x in uit if x.get("recept_id")) % len(recepten)]
-                    uit.append({"datum": d["datum"], "recept_id": rec["id"], "titel": rec["naam"], "kookt": "Papa",
+                    uit.append({"datum": d["datum"], "dag": d["dag"], "recept_id": rec["id"], "titel": rec["naam"], "kookt": "Papa",
                                 "porties": 8, "vriezer": 4, "boodschappen": True, "reden": "lekker"})
             return {"data": json.dumps(uit)}
         return {"data": "```json\n" + json.dumps({
