@@ -223,6 +223,19 @@ async def main():
     await e.sync(forceer=True)
     check(plan["datum"] == nieuwe_dag.isoformat(), "verschuiving in agenda overgenomen")
 
+    # agenda tijdelijk leeg (bijv. net na opstarten): planning blijft staan
+    voor = len(e.s["planning"])
+    echte = ent.async_get_events
+
+    async def leeg(*a, **k):
+        return []
+
+    ent.async_get_events = leeg
+    await e.sync(forceer=True)
+    ent.async_get_events = echte
+    check(len(e.s["planning"]) == voor and all(p.get("uid") for p in e.s["planning"] if not p.get("historie")),
+          "lege agenda-respons verwijdert niets")
+
     # in de agenda verwijderen
     tweede = sorted(e.s["planning"], key=lambda p: p["datum"])[0]
     await ent.async_delete_event(tweede["uid"])

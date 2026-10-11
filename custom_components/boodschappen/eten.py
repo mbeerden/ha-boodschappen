@@ -372,6 +372,7 @@ class Eten:
         self._store: Store = Store(self.hass, 1, f"boodschappen.{entry_id}.eten")
         self.s: dict[str, Any] = {}
         self._sync_ts = 0.0
+        self._ooit_gelezen = False
         self.extern: list[dict] = []  # agenda-events zonder kenmerk (bijv. handmatig ingevoerd)
         self.sync_fout: str | None = None
 
@@ -890,7 +891,16 @@ class Eten:
                 self.hass, datetime.combine(van, datetime.min.time(), tz), datetime.combine(tot, datetime.min.time(), tz))
         except Exception as err:  # noqa: BLE001
             self.sync_fout = f"Agenda lezen mislukt: {err}"
+            self._sync_ts = time.time() - SYNC_INTERVAL + 30  # over 30 s opnieuw
             return
+        if not events:
+            # Lege agenda: bijna altijd 'nog niet geladen' (net na het opstarten). Dan niets concluderen —
+            # anders zouden geplande maaltijden als 'verwijderd in de agenda' worden gezien.
+            heeft_eigen = any(p.get("uid") and van.isoformat() <= p["datum"] < tot.isoformat() for p in self.s["planning"])
+            if heeft_eigen or self.extern or not self._ooit_gelezen:
+                self._sync_ts = time.time() - SYNC_INTERVAL + 30
+                return
+        self._ooit_gelezen = True
         self.sync_fout = None
         per_id: dict[str, Any] = {}
         extern = []
