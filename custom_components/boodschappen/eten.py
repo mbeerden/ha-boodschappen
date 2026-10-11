@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 MARKER = re.compile(r"\beten:([0-9a-f]{8,32})\b")
+UIT_VRIEZER = re.compile(r"(?i)\buit\s+(de\s+)?vriezer\b")
 SYNC_INTERVAL = 300  # agenda hooguit elke 5 minuten teruglezen
 DAGEN = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
 
@@ -476,6 +477,11 @@ class Eten:
             if iso not in vast:
                 continue
             rid = x.get("recept_id") if x.get("recept_id") in self.s["recepten"] else None
+            idee = extern.get(iso) or ""
+            if UIT_VRIEZER.search(idee) or UIT_VRIEZER.search(str(x.get("titel") or "")):
+                # eten uit de vriezer: titel uit de agenda houden, niets te koken of te kopen
+                x = {**x, "titel": idee or x.get("titel"), "kookt": "", "porties": None, "vriezer": 0, "boodschappen": False}
+                rid = None
             titel = self.s["recepten"][rid]["naam"] if rid else str(x.get("titel") or "").strip()
             dagen_uit.append({
                 "datum": iso, "recept_id": rid, "titel": titel or "?",

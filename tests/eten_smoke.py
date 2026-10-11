@@ -99,7 +99,10 @@ async def main():
             uit = []
             recepten.sort(key=lambda r: r["naam"] != "Linzensoep")
             for n, d in enumerate([d for d in dagen if not d.get("vast")] and dagen):
-                if d.get("vast") or d.get("agenda"):
+                if d.get("agenda") and "vriezer" in d["agenda"]:
+                    uit.append({"datum": d["datum"], "dag": d["dag"], "recept_id": recepten[0]["id"], "titel": recepten[0]["naam"],
+                                "kookt": "Papa", "porties": 4, "boodschappen": False})
+                elif d.get("vast") or d.get("agenda"):
                     uit.append({"datum": d["datum"], "dag": d["dag"], "titel": d.get("vast") or d["agenda"], "kookt": "opa", "boodschappen": False})
                 else:
                     rec = recepten[sum(1 for x in uit if x.get("recept_id")) % len(recepten)]
@@ -152,6 +155,17 @@ async def main():
     # agenda teruglezen: los event zichtbaar
     await e.sync(forceer=True)
     check([x["titel"] for x in e.extern] == ["Nasi (opa en oma)"], "los agenda-event zichtbaar, hele-dag-event genegeerd")
+
+    # 'uit de vriezer' in de agenda blijft zo staan, ook als de AI er een recept bij zoekt
+    dag6 = (VANDAAG + timedelta(days=6)).isoformat()
+    await hass.services.async_call("calendar", "create_event", {"summary": "Soep (uit de vriezer)", "start_date_time": f"{dag6} 17:00:00",
+        "end_date_time": f"{dag6} 18:00:00"}, target={"entity_id": "calendar.eet_planning"}, blocking=True)
+    await e.voorstel_maken(dag6, 1, "")
+    vd = e.s["voorstel"]["dagen"][0]
+    check(vd["titel"] == "Soep (uit de vriezer)" and not vd["recept_id"] and not vd["boodschappen"], "vriezerdag blijft vriezerdag")
+    e.voorstel_weg()
+    await e._extern_weg(vd["vervangt"])
+    await e.sync(forceer=True)
 
     # weekmenu voorstellen voor 3 dagen vanaf morgen
     await e.voorstel_maken(morgen.isoformat(), 3, "iets met soep")
