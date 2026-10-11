@@ -287,6 +287,8 @@ def dag_prompt(
         "- reden: één korte zin.\n\n"
         f"Vandaag: {DAGEN[vandaag.weekday()]} {vandaag.isoformat()}\n"
         f"Deze dag: {dag['dag'].upper()} {dag['datum']}\n"
+        + (f"Nu in de agenda voor deze dag: {dag['agenda']} (de wens gaat voor)\n" if dag.get("agenda") else "")
+        + 
         f"Wens: {wens or '-'}\n\n"
         f"Huisregels:\n{huisregels or '-'}\n\n"
         f"Rest van de week:\n{dagen_tekst(week) or '-'}\n\n"
@@ -602,7 +604,9 @@ class Eten:
                 laatst[p["recept_id"]] = max(laatst.get(p["recept_id"], ""), p["datum"])
         recepten = [recept_compact(r, gem.get(r["id"]), laatst.get(r["id"])) for r in self.s["recepten"].values()]
         res = await self._vraag_ai("Eten: dag aanpassen", dag_prompt(
-            {"datum": datum, "dag": DAGEN[d.weekday()]}, wens, sorted(week.values(), key=lambda x: x["datum"]),
+            {"datum": datum, "dag": DAGEN[d.weekday()],
+             "agenda": next((e["titel"] for e in self.extern if e["datum"] == datum), None)},
+            wens, sorted(week.values(), key=lambda x: x["datum"]),
             recepten, self.inst.get("huisregels", ""), self._producten(), date.today()))
         if not isinstance(res, dict):
             raise ValueError("De AI gaf geen bruikbaar voorstel terug")

@@ -20,6 +20,7 @@ from ha_smoke import STATE, fake_grocy  # noqa: E402
 
 VANDAAG = date.today()
 FOUTEN: list[str] = []
+AI_LOG: list[str] = []
 
 
 def check(ok, wat):
@@ -85,6 +86,7 @@ async def main():
 
     async def ai(call):
         vragen.append(call.data["task_name"])
+        AI_LOG.append(call.data["instructions"])
         instr = call.data["instructions"]
         if "weekmenu" in call.data["task_name"]:
             dagen = []
@@ -323,6 +325,21 @@ async def main():
     await e.suggestie_toepassen(dag12)
     check(sug3 in e.s["recepten"] and p12["titel"] == "Vega goulash", "toegepast concept in bibliotheek")
     await e.plan_verwijderen(p12["id"])
+
+    # --- los agenda-idee (bijv. vandaag) via de AI aanpassen ---
+    dag18 = (VANDAAG + timedelta(days=18)).isoformat()
+    await hass.services.async_call("calendar", "create_event", {"summary": "Curry (voor 3x koken)", "start_date_time": f"{dag18} 17:00:00",
+        "end_date_time": f"{dag18} 18:00:00"}, target={"entity_id": "calendar.eet_planning"}, blocking=True)
+    await e.sync(forceer=True)
+    vragen.clear()
+    await e.dag_aanpassen(dag18, "goulash")
+    check(dag18 in e.s["suggesties"] and not any(p["datum"] == dag18 for p in e.s["planning"]), "suggestie bij los agenda-idee")
+    check(AI_LOG and "Nu in de agenda voor deze dag: Curry (voor 3x koken)" in AI_LOG[-1], "agenda-idee in de prompt")
+    await e.suggestie_toepassen(dag18)
+    await e.sync(forceer=True)
+    p18 = next(p for p in e.s["planning"] if p["datum"] == dag18)
+    check(p18["titel"] == "Vega goulash" and not any(x["datum"] == dag18 for x in e.extern), "toegepast, los idee vervangen")
+    await e.plan_verwijderen(p18["id"])
 
     # --- geen maaltijd ---
     dag16 = (VANDAAG + timedelta(days=16)).isoformat()

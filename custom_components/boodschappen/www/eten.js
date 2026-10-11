@@ -309,6 +309,7 @@ class EtenPanel extends HTMLElement {
     if (!ex.length)
       html += `<div class="leegrij"><button class="leegdag" data-act="plan" data-datum="${ds}">+ Plan een maaltijd</button>
         <button class="link" data-act="geenmaaltijd" data-datum="${ds}">Geen maaltijd</button></div>`;
+    if (ds >= vandaag) html += this._suggestie(ds) || this._aanpasBlok(ds, null);
     return html;
   }
 
