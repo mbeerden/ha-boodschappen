@@ -898,7 +898,7 @@ class Eten:
             # anders zouden geplande maaltijden als 'verwijderd in de agenda' worden gezien.
             heeft_eigen = any(p.get("uid") and van.isoformat() <= p["datum"] < tot.isoformat() for p in self.s["planning"])
             if heeft_eigen or self.extern or not self._ooit_gelezen:
-                self._sync_ts = time.time() - SYNC_INTERVAL + 30
+                self._sync_ts = 0.0  # bij de volgende vraag meteen opnieuw proberen
                 return
         self._ooit_gelezen = True
         self.sync_fout = None
