@@ -6,6 +6,7 @@ Verschuift of verwijdert iemand zo'n event in de agenda, dan neemt de planning d
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta
 import json
 import logging
@@ -730,8 +731,17 @@ class Eten:
         ent = self.inst.get("ai") or next(iter(sorted(self.hass.states.async_entity_ids("ai_task"))), None)
         if not ent:
             raise ValueError("Geen AI-taak (ai_task) gevonden")
-        res = await self.hass.services.async_call(
-            "ai_task", "generate_data", {"task_name": taak, "instructions": instructie, "entity_id": ent},
-            blocking=True, return_response=True,
-        )
-        return parse_json((res or {}).get("data"))
+        for poging in range(3):
+            try:
+                res = await self.hass.services.async_call(
+                    "ai_task", "generate_data", {"task_name": taak, "instructions": instructie, "entity_id": ent},
+                    blocking=True, return_response=True,
+                )
+                return parse_json((res or {}).get("data"))
+            except Exception as err:  # noqa: BLE001 - tijdelijke drukte bij de AI-dienst: kort wachten en opnieuw
+                tijdelijk = any(x in str(err) for x in ("503", "UNAVAILABLE", "high demand", "429", "overloaded"))
+                if not tijdelijk or poging == 2:
+                    raise
+                _LOGGER.info("AI-taak tijdelijk niet beschikbaar, opnieuw over %s s", 5 * (poging + 1))
+                await asyncio.sleep(5 * (poging + 1))
+        return None
