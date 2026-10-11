@@ -207,6 +207,12 @@ async def main():
     qid = data["queue"][0]["id"]
     await c.bon.nieuw_product(qid, "Chocopasta", 4, 1)
     print("WS na nieuw product", [l["status"] for l in ws.payload(c)["bonnen"][0]["regels"]])
+    # verkeerd uitgelezen bedrag corrigeren: boeking opnieuw met de juiste prijs
+    bon = c.state["bonnen"][0]
+    kk = next(l for l in bon["regels"] if l["tekst"] == "KOMKOMMER")
+    STATE["log"].clear()
+    await c.bon.herkoppel(bon["id"], kk["id"], None, 1, False, 1.58)
+    print("CORRECTIE", kk["totaal"], kk["prijs_per_eenheid"], bon["totaal"], [l[0] for l in STATE["log"]])
     notes = [s.attributes.get("title") for s in hass.states.async_all("persistent_notification")]
     print("NOTIF", hass.states.async_entity_ids("persistent_notification")[:3], notes[:2])
     print("GROCY-LOG:")

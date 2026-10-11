@@ -271,11 +271,19 @@ class BonVerwerker:
         await self.c.async_refresh()
         return await self.koppel(qid, pid, factor, True)
 
-    async def herkoppel(self, bon_id: str, line_id: str, product_id: int | None, factor: float = 1.0, negeren: bool = False) -> dict | None:
-        """Een al verwerkte bonregel corrigeren (andere koppeling, ander aantal per verpakking, of negeren)."""
+    async def herkoppel(self, bon_id: str, line_id: str, product_id: int | None, factor: float = 1.0, negeren: bool = False,
+                        totaal: float | None = None) -> dict | None:
+        """Een al verwerkte bonregel corrigeren (andere koppeling, ander aantal per verpakking, ander bedrag, of negeren)."""
         bon, line = self._bon_line(bon_id, line_id)
         if line is None:
             raise ValueError("Bonregel niet gevonden")
+        if product_id is None and not negeren:
+            product_id = line.get("product_id")
+            factor = factor or line.get("factor") or 1
+        if totaal is not None:
+            # verkeerd uitgelezen bedrag (bijv. een actiekorting op de verkeerde regel) corrigeren
+            line["totaal"] = round(float(totaal), 2)
+            bon["totaal"] = round(sum(l["totaal"] for l in bon["regels"] if l.get("status") != "genegeerd"), 2)
         if line.get("tx"):
             try:
                 await self.c.api.undo_transaction(line["tx"])
