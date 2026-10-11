@@ -216,6 +216,15 @@ async def main():
     check(n == 1 and lr["laatst"] == (VANDAAG - timedelta(days=20)).isoformat(), "historie vastgelegd")
     await e.sync(forceer=True)
     check(any(p.get("historie") for p in e.s["planning"]), "historie blijft na sync")
+    # plannen op een dag met een los event: los event verdwijnt
+    dag9 = (VANDAAG + timedelta(days=9)).isoformat()
+    await hass.services.async_call("calendar", "create_event", {"summary": "Idee", "start_date_time": f"{dag9} 17:00:00",
+        "end_date_time": f"{dag9} 18:00:00"}, target={"entity_id": "calendar.eet_planning"}, blocking=True)
+    await e.sync(forceer=True)
+    pl = await e.plan(dag9, {"recept_id": rid})
+    await e.sync(forceer=True)
+    check(not any(x["datum"] == dag9 for x in e.extern) and pl["uid"], "plannen vervangt los event")
+    await e.plan_verwijderen(pl["id"])
 
     # beoordelen
     e.beoordeel(pid, "A", 5)

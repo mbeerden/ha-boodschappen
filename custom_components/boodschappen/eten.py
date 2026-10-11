@@ -506,6 +506,10 @@ class Eten:
         if item.get("recept_id") != oud_recept:
             item["op_lijst"] = False
         item.setdefault("boodschappen", True)
+        item.pop("historie", None)
+        if not item.get("uid"):
+            # losse agenda-events op die dag (eerder handmatig gezet) vervangen, geen dubbele maaltijd
+            await self._extern_weg([e["uid"] for e in self.extern if e["datum"] == datum and e.get("uid")])
         await self._event_schrijven(item)
         self.save()
         if sync and velden.get("lijst"):
