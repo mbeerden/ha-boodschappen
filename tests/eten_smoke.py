@@ -120,6 +120,7 @@ async def main():
     check("eten" in hass.data.get(frontend.DATA_PANELS, {}), "paneel /eten geregistreerd")
     c = ws._coordinator(hass)
     e = c.eten
+    e._agenda()
     check(e.inst["agenda"] == "calendar.eet_planning", "agenda automatisch gekozen")
     e.instellingen_opslaan({"personen": "A, B, C", "huisregels": "Zondag dubbel koken"})
     check(e.inst["personen"] == ["A", "B", "C"], "personen opgeslagen")
@@ -128,6 +129,13 @@ async def main():
     rid = await e.recept_importeren(None, "Linzensoep met ui en paprika ...")
     r = e.s["recepten"][rid]
     check(r["naam"] == "Linzensoep" and len(r["ingredienten"]) == 3 and r["ingredienten"][1]["basis"], "recept via AI omgezet")
+    # koppelen vult vega/tijd/labels aan als die ontbreken
+    kale = e.recept_opslaan({"naam": "Kale soep", "ingredienten": ["2 uien"], "stappen": ["Kook"]})
+    await e.recept_koppelen(kale)
+    k = e.s["recepten"][kale]
+    check(k["vega"] and k["tijd"] == 35 and k["tags"] == ["soep"] and k["ingredienten"][0]["product_id"] == 15
+          and k["stappen"] == ["Kook"], "koppelen vult aan, stappen blijven")
+    e.recept_verwijderen(kale)
     rid2 = e.recept_opslaan({"naam": "Wraps", "porties": 4, "ingredienten": [{"tekst": "wraps", "product_id": 1, "aantal": 1}],
                              "stappen": ["Vullen"]})
 

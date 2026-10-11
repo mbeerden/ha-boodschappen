@@ -271,6 +271,7 @@ def schoon_recept(r: dict, bestaand: dict | None = None) -> dict:
         "porties": int(num(r.get("porties"), 4) or 4),
         "tijd": int(num(r.get("tijd"), 0) or 0) or None,
         "vega": bool(r.get("vega")),
+        "vega_gezet": bool(r.get("vega_gezet") or (bestaand or {}).get("vega_gezet")),
         "tags": [str(t).strip() for t in (r.get("tags") or []) if str(t).strip()][:8],
         "ingredienten": ingr,
         "stappen": stappen,
@@ -301,10 +302,6 @@ class Eten:
             "beoordelingen": data.get("beoordelingen", []),
             "instellingen": {**DEFAULT_INSTELLINGEN, **(data.get("instellingen") or {})},
         }
-        if not self.s["instellingen"]["agenda"]:
-            cal = sorted(e for e in self.hass.states.async_entity_ids("calendar") if "eet" in e)
-            if cal:
-                self.s["instellingen"]["agenda"] = cal[0]
 
     def save(self) -> None:
         cutoff = (date.today() - timedelta(days=120)).isoformat()
@@ -381,6 +378,13 @@ class Eten:
         if not isinstance(res, dict):
             raise ValueError("De AI gaf geen bruikbaar antwoord")
         nieuw = {**r, "ingredienten": res.get("ingredienten") or r["ingredienten"]}
+        # alleen aanvullen wat nog ontbreekt; de rest van het recept blijft zoals het is
+        if "vega" in res and not r.get("vega_gezet"):
+            nieuw["vega"] = bool(res["vega"])
+        if not r.get("tijd") and res.get("tijd"):
+            nieuw["tijd"] = res["tijd"]
+        if not r.get("tags") and res.get("tags"):
+            nieuw["tags"] = res["tags"]
         self.recept_opslaan(nieuw)
 
     def _producten(self) -> list[dict]:
@@ -562,6 +566,7 @@ class Eten:
         self.save()
 
     def instellingen_opslaan(self, inst: dict) -> None:
+        self.inst["agenda_gekozen"] = True
         for k in DEFAULT_INSTELLINGEN:
             if k in inst:
                 self.inst[k] = inst[k]
@@ -572,6 +577,13 @@ class Eten:
 
     # --- agenda ------------------------------------------------------------
     def _agenda(self):
+        if not self.inst.get("agenda") and not self.inst.get("agenda_gekozen"):
+            # eerste keer: een agenda met 'eet' in de naam voorstellen (pas na het opstarten bekend)
+            cal = sorted(e for e in self.hass.states.async_entity_ids("calendar") if "eet" in e)
+            if cal:
+                self.inst["agenda"] = cal[0]
+                self.inst["agenda_gekozen"] = True
+                self.save()
         ent_id = self.inst.get("agenda")
         if not ent_id:
             return None

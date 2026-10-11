@@ -736,6 +736,7 @@ class EtenPanel extends HTMLElement {
           porties: Number(v("porties").value || 4),
           tijd: v("tijd").value ? Number(v("tijd").value) : null,
           vega: v("vega").checked,
+          vega_gezet: true,
           tags: v("tags").value.split(",").map((x) => x.trim()).filter(Boolean),
           ingredienten,
           stappen: v("stappen").value.split("\n").map((x) => x.trim()).filter(Boolean),
