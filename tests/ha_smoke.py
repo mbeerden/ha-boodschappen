@@ -258,6 +258,13 @@ async def main():
     STATE["log"].clear()
     await c.bon.herkoppel_nieuw(bon["id"], kk["id"], "Snackkomkommer", 2, 1, None)
     print("NIEUW", kk["grocy_naam"], kk["product_id"], [l[0] for l in STATE["log"]])
+    # --- Grocy zet zelf een Jumbo-product op de Lidl-lijst: wordt verhuisd; eigen keuze blijft ---
+    STATE["items"].append({"id": 900, "product_id": 245, "note": None, "amount": 1, "shopping_list_id": 1, "done": 0})
+    await c.add_product(1, 146, 1)  # zelf een Jumbo-product op de Lidl-lijst gezet
+    await c.async_refresh()
+    await c.async_refresh()
+    print("WINKEL", [(i["id"], i["product_id"], i["shopping_list_id"]) for i in STATE["items"] if i["product_id"] in (245, 146) and not i.get("done")])
+
     # --- producten: nieuw, details, op ---
     STATE["log"].clear()
     STATE["voorraad"] = {65: 0}

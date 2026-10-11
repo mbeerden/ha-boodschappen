@@ -31,6 +31,7 @@ class GrocyApi:
         self._base = base_url.rstrip("/")
         self._headers = {"GROCY-API-KEY": api_key, "Accept": "application/json"}
         self._ssl = None if verify_ssl else False
+        self.aangemaakt: set[int] = set()  # lijst-items die deze integratie zelf heeft aangemaakt
 
     async def _request(self, method: str, path: str, json: Any = None) -> Any:
         try:
@@ -77,7 +78,10 @@ class GrocyApi:
         if note:
             data["note"] = note
         res = await self.post("/objects/shopping_list", data)
-        return int(res["created_object_id"]) if res and "created_object_id" in res else None
+        new_id = int(res["created_object_id"]) if res and "created_object_id" in res else None
+        if new_id:
+            self.aangemaakt.add(new_id)
+        return new_id
 
     async def update_list_item(self, item_id: int, data: dict) -> None:
         await self.put(f"/objects/shopping_list/{item_id}", data)

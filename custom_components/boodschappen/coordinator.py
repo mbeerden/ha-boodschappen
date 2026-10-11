@@ -41,7 +41,7 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
             old = await self._old_store.async_load() or {}
             data = {"transactions": old}
         for key, default in (("transactions", {}), ("afvink", []), ("mappings", {}), ("queue", []), ("bonnen", []),
-                             ("favorieten", {"vast": [], "verborgen": []}),
+                             ("favorieten", {"vast": [], "verborgen": []}), ("eigen_items", []), ("eigen_init", False),
                              ("aanbiedingen", {"resultaat": [], "hash": {}, "genegeerd": [], "gemeld": [], "bijgewerkt": None, "fout": {}})):
             self.state[key] = data.get(key, default)
 
@@ -75,6 +75,7 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
                 self._purchases_ts = time.time()
             except GrocyError as err:
                 _LOGGER.debug("Aankoophistorie ophalen mislukt: %s", err)
+        await self._verkeerde_winkel(data)
         known = {str(i.id) for i in data.items}
         stale = [k for k in self._transactions if k not in known]
         for k in stale:
@@ -82,6 +83,36 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
         if stale:
             self.save()
         return data
+
+    async def _verkeerde_winkel(self, data: GrocyData) -> None:
+        """Items die Grocy zelf toevoegt (bijv. 'automatisch onder minimumvoorraad op de lijst') komen altijd op
+        de eerste lijst. Zulke items verhuizen naar de lijst van de winkel van het product. Wat je zelf (via deze
+        integratie) op een andere lijst zet, blijft staan."""
+        eigen = set(self.state.setdefault("eigen_items", []))
+        eigen |= self.api.aangemaakt
+        if not self.state.get("eigen_init"):
+            # eerste keer: alles wat er nu staat geldt als bewust zo neergezet
+            eigen |= {i.id for i in data.items}
+            self.state["eigen_init"] = True
+        verplaatst = False
+        for i in data.items:
+            if i.id in eigen or i.done or not i.product_id:
+                continue
+            doel = data.list_for_product(i.product_id)
+            if doel != i.list_id and doel in data.lists:
+                try:
+                    await self.api.update_list_item(i.id, {"shopping_list_id": doel})
+                    i.list_id = doel
+                    verplaatst = True
+                    _LOGGER.debug("Item %s verplaatst naar lijst %s", i.name, doel)
+                except GrocyError as err:
+                    _LOGGER.debug("Item verplaatsen mislukt: %s", err)
+            eigen.add(i.id)  # één keer corrigeren; daarna mag je het zelf verplaatsen
+        bestaand = {i.id for i in data.items}
+        nieuw = sorted(eigen & bestaand)
+        if nieuw != self.state["eigen_items"] or verplaatst:
+            self.state["eigen_items"] = nieuw
+            self.save()
 
     # Lijst-acties ------------------------------------------------------------
     async def add_text(self, list_id: int, text: str, note: str | None = None) -> None:
