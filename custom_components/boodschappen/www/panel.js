@@ -199,7 +199,9 @@ class BoodschappenPanel extends HTMLElement {
       <div class="main"></div>
       <div class="toast" role="status" hidden></div>
       <div class="onder"></div>
-      <div class="modal" hidden></div>`;
+      <div class="modal" hidden></div>
+      <div class="wielbak" hidden></div>
+      <div class="sleepbel" hidden aria-hidden="true"></div>`;
     const menu = document.createElement("ha-menu-button");
     menu.hass = this._hass;
     menu.narrow = this._narrow;
@@ -210,6 +212,7 @@ class BoodschappenPanel extends HTMLElement {
     root.addEventListener("click", (e) => this._click(e));
     root.addEventListener("input", (e) => this._input(e));
     root.addEventListener("keydown", (e) => this._key(e));
+    root.addEventListener("pointerdown", (e) => this._veegStart(e));
   }
 
   _render() {
@@ -605,6 +608,9 @@ class BoodschappenPanel extends HTMLElement {
       ${
         i.done
           ? `<span class="n">${fmtNum(i.amount)}</span>`
+          : this.winkel
+          ? `<button class="aantal ${Number(i.amount) !== 1 ? "meer" : ""}" data-act="aantal" data-id="${i.id}" data-amount="${i.amount}"
+               aria-label="Aantal ${esc(i.name)}: ${fmtNum(i.amount)}. Tik om te kiezen, of veeg omhoog of omlaag." title="Tik of veeg om het aantal te wijzigen">×${fmtNum(i.amount)}</button>`
           : `<span class="stepper">
               <button data-act="min" data-id="${i.id}" data-amount="${i.amount}" aria-label="Minder ${esc(i.name)}">−</button>
               <span class="n">${fmtNum(i.amount)}</span>
@@ -612,6 +618,128 @@ class BoodschappenPanel extends HTMLElement {
             </span>`
       }${extra}
     </li>`;
+  }
+
+  // ---------------------------------------------------------------- aantal: vegen op het getal of draaiwiel
+  _veegStart(e) {
+    const b = e.target.closest?.("button.aantal");
+    if (!b || this.busy || (e.pointerType === "mouse" && e.button !== 0)) return;
+    const start = Number(b.dataset.amount) || 1;
+    const y0 = e.clientY;
+    const bel = this.shadowRoot.querySelector(".sleepbel");
+    let waarde = start;
+    let gesleept = false;
+    try {
+      b.setPointerCapture(e.pointerId);
+    } catch (_) {}
+    const toon = () => {
+      const r = b.getBoundingClientRect();
+      bel.textContent = waarde <= 0 ? "0 · weg" : fmtNum(waarde);
+      bel.classList.toggle("weg", waarde <= 0);
+      bel.style.left = `${r.left + r.width / 2}px`;
+      bel.style.top = `${r.top - 12}px`;
+      bel.hidden = false;
+    };
+    const beweeg = (ev) => {
+      const dy = y0 - ev.clientY;
+      if (!gesleept && Math.abs(dy) < 8) return;
+      gesleept = true;
+      ev.preventDefault();
+      const basis = Number.isInteger(start) ? start : Math.round(start);
+      const nieuw = Math.max(0, Math.min(99, basis + Math.round(dy / 25)));
+      const vorige = waarde;
+      waarde = Math.round(dy / 25) === 0 ? start : nieuw;
+      if (waarde !== vorige) {
+        try {
+          navigator.vibrate?.(8);
+        } catch (_) {}
+      }
+      toon();
+    };
+    const klaar = () => {
+      b.removeEventListener("pointermove", beweeg);
+      b.removeEventListener("pointerup", klaar);
+      b.removeEventListener("pointercancel", klaar);
+      bel.hidden = true;
+      if (!gesleept) return; // gewone tik: het draaiwiel opent via de klik
+      this._negeerKlik = true;
+      setTimeout(() => (this._negeerKlik = false), 400);
+      if (waarde !== start) this._zetAantal(Number(b.dataset.id), waarde);
+    };
+    b.addEventListener("pointermove", beweeg);
+    b.addEventListener("pointerup", klaar);
+    b.addEventListener("pointercancel", klaar);
+  }
+
+  _zetAantal(id, waarde) {
+    if (waarde <= 0) return this._do({ type: "boodschappen/item_delete", item_id: id });
+    return this._do({ type: "boodschappen/item_amount", item_id: id, amount: waarde });
+  }
+
+  _openWiel(b, id, huidig) {
+    const H = 44;
+    const waarden = [...Array(31).keys()];
+    if (!waarden.includes(huidig)) waarden.push(huidig);
+    waarden.sort((a, c) => a - c);
+    const bak = this.shadowRoot.querySelector(".wielbak");
+    bak.innerHTML = `<div class="wiel" role="dialog" aria-label="Aantal kiezen">
+        <div class="wielrol" tabindex="0" aria-label="Aantal">
+          <div class="wielpad"></div>${waarden
+            .map((v) => `<div class="wielwaarde ${v === 0 ? "nul" : ""}" data-v="${v}">${v === 0 ? "0 · weg" : fmtNum(v)}</div>`)
+            .join("")}<div class="wielpad"></div>
+        </div>
+        <div class="wielband" aria-hidden="true"></div>
+        <div class="wielknoppen"><button class="link" data-act="wielweg">Annuleren</button><button class="primary klein" data-act="wielklaar">Klaar</button></div>
+      </div>`;
+    bak.hidden = false;
+    this.modal = { soort: "wiel", id, huidig, waarden, H };
+    const wiel = bak.querySelector(".wiel");
+    const r = b.getBoundingClientRect();
+    const hoog = wiel.offsetHeight;
+    const boven = r.top - hoog - 8 > 8;
+    wiel.style.top = `${boven ? r.top - hoog - 8 : Math.min(window.innerHeight - hoog - 8, r.bottom + 8)}px`;
+    wiel.style.left = `${Math.max(8, Math.min(window.innerWidth - wiel.offsetWidth - 8, r.right - wiel.offsetWidth))}px`;
+    const rol = bak.querySelector(".wielrol");
+    rol.scrollTop = waarden.indexOf(huidig) * H;
+    const markeer = () => {
+      const i = Math.max(0, Math.min(waarden.length - 1, Math.round(rol.scrollTop / H)));
+      if (this.modal?.soort === "wiel" && this.modal.index !== i) {
+        this.modal.index = i;
+        rol.querySelectorAll(".wielwaarde").forEach((el, n) => el.classList.toggle("on", n === i));
+        wiel.classList.toggle("weg", waarden[i] === 0);
+      }
+    };
+    rol.addEventListener("scroll", markeer, { passive: true });
+    rol.addEventListener("keydown", (ev) => {
+      if (ev.key === "ArrowUp" || ev.key === "ArrowDown") {
+        ev.preventDefault();
+        rol.scrollTop += ev.key === "ArrowUp" ? -H : H;
+      } else if (ev.key === "Enter") this._wielKlaar();
+      else if (ev.key === "Escape") this._sluitWiel();
+    });
+    rol.querySelectorAll(".wielwaarde").forEach((el, n) => el.addEventListener("click", () => rol.scrollTo({ top: n * H, behavior: "smooth" })));
+    bak.onclick = (ev) => {
+      if (ev.target === bak) this._sluitWiel();
+    };
+    markeer();
+    rol.focus({ preventScroll: true });
+  }
+
+  _sluitWiel() {
+    const bak = this.shadowRoot.querySelector(".wielbak");
+    bak.hidden = true;
+    bak.innerHTML = "";
+    if (this.modal?.soort === "wiel") this.modal = null;
+  }
+
+  _wielKlaar() {
+    const m = this.modal;
+    if (m?.soort !== "wiel") return;
+    const rol = this.shadowRoot.querySelector(".wielrol");
+    const i = Math.max(0, Math.min(m.waarden.length - 1, Math.round(rol.scrollTop / m.H)));
+    const v = m.waarden[i];
+    this._sluitWiel();
+    if (v !== m.huidig) this._zetAantal(m.id, v);
   }
 
   _bonnen() {
@@ -978,6 +1106,16 @@ class BoodschappenPanel extends HTMLElement {
         return this._openNieuw(b.dataset.naam, id, 1);
       case "info":
         return this._openDetails(Number(b.dataset.pid));
+      case "aantal":
+        if (this._negeerKlik) {
+          this._negeerKlik = false;
+          return;
+        }
+        return this._openWiel(b, id, Number(b.dataset.amount));
+      case "wielklaar":
+        return this._wielKlaar();
+      case "wielweg":
+        return this._sluitWiel();
       case "notitie": {
         const it = this.data.items.find((x) => x.id === id);
         if (!it) return;
@@ -1133,6 +1271,31 @@ header .vul { flex: 1; }
 :host(.winkel) button.info { height: 38px; width: 34px; margin-right: 2px; }
 :host(.winkel) .info.leeg { width: 34px; margin-right: 2px; }
 :host(.winkel) .stepper button { width: 34px; }
+.aantal { flex: none; min-width: 44px; height: 36px; padding: 0 10px; margin-right: 2px; border-radius: 18px; font-size: 15px;
+  font-variant-numeric: tabular-nums; color: var(--secondary-text-color); background: var(--zacht); touch-action: none; user-select: none; -webkit-user-select: none; }
+.aantal.meer { color: #fff; background: var(--route); font-weight: 600; }
+.sleepbel { position: fixed; z-index: 30; transform: translate(-50%, -100%); min-width: 64px; padding: 8px 14px; border-radius: 16px;
+  background: var(--route, var(--primary-color)); color: #fff; font-size: 28px; font-weight: 600; text-align: center; pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0,0,0,.35); font-variant-numeric: tabular-nums; }
+.sleepbel.weg { background: var(--error-color, #c62828); font-size: 20px; }
+.sleepbel[hidden], .wielbak[hidden] { display: none; }
+.wielbak { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.25); }
+.wiel { position: fixed; width: 150px; background: var(--card-background-color); border-radius: 16px; box-shadow: 0 8px 28px rgba(0,0,0,.45); overflow: hidden; }
+.wielrol { height: 220px; overflow-y: auto; scroll-snap-type: y mandatory; scrollbar-width: none; outline: none;
+  -webkit-mask-image: linear-gradient(transparent, #000 30%, #000 70%, transparent); mask-image: linear-gradient(transparent, #000 30%, #000 70%, transparent); }
+.wielrol::-webkit-scrollbar { display: none; }
+.wielpad { height: 88px; }
+.wielwaarde { height: 44px; line-height: 44px; text-align: center; font-size: 20px; scroll-snap-align: center; color: var(--secondary-text-color);
+  font-variant-numeric: tabular-nums; cursor: pointer; }
+.wielwaarde.on { color: var(--primary-text-color); font-size: 24px; font-weight: 600; }
+.wielwaarde.nul { color: var(--error-color, #c62828); font-size: 17px; }
+.wielwaarde.nul.on { color: var(--error-color, #c62828); font-size: 19px; }
+.wielband { position: absolute; left: 8px; right: 8px; top: 88px; height: 44px; border-radius: 10px; pointer-events: none;
+  background: color-mix(in srgb, var(--route, var(--primary-color)) 16%, transparent); }
+.wiel.weg .wielband { background: color-mix(in srgb, var(--error-color, #c62828) 20%, transparent); }
+.wielknoppen { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 8px; border-top: 1px solid var(--rand); }
+.wielknoppen .link { margin: 0; }
+.primary.klein { height: 36px; padding: 0 16px; }
 :host(.winkel) .vink { gap: 10px; padding-left: 10px; }
 :host(.winkel) .naam { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .txt { overflow: hidden; }
