@@ -99,14 +99,17 @@ class Producten:
                              if group_id and p.get("product_group_id") and int(p["product_group_id"]) == int(group_id)), None)
             template = template or next(iter(self.d.products.values()), {})
             pid = await self.c.api.create_product(naam, group_id, winkel_id, template)
+        in_mandje = None
         if item_id:
             oud = next((i for i in self.d.items if i.id == int(item_id)), None)
             if oud:
                 amount = oud.amount or amount
+                if oud.done:
+                    in_mandje = oud.list_id  # afgevinkt los item (afrekenscherm): blijft in het mandje van die winkel
                 await self.c.api.delete_list_item(oud.id)
         await self.c.async_refresh()
-        lid = self._list_for_location(winkel_id)
-        await self.c.add_product(lid, pid, float(amount or 1))
+        lid = in_mandje or self._list_for_location(winkel_id)
+        await self.c.add_product(lid, pid, float(amount or 1), done=in_mandje is not None)
         return pid
 
     # --- details -----------------------------------------------------------

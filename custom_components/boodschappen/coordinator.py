@@ -16,7 +16,8 @@ from .logic import GrocyData, compute_favorites, match_product, parse_entry
 
 _LOGGER = logging.getLogger(__name__)
 
-AFVINK_BEWAARTIJD = 14 * 24 * 3600  # afvink-boekingen 2 weken bewaren voor koppeling met bonnetjes
+AFVINK_BEWAARTIJD = 30 * 24 * 3600  # winkelboekingen 30 dagen bewaren voor koppeling met (late) bonnetjes
+VERGETEN_NA = 3 * 3600  # na 3 uur een melding als afgevinkte items nog niet zijn afgerond
 FAVORIETEN_WEKEN = 8
 FAVORIETEN_VERVERS = 3600  # aankoophistorie 1x per uur ophalen
 
@@ -27,10 +28,11 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
         self.api = api
         self._old_store: Store = Store(hass, 1, f"{DOMAIN}.{entry_id}.transacties")
         self._store: Store = Store(hass, 1, f"{DOMAIN}.{entry_id}.data")
-        # state: transacties per lijst-item, afvink-boekingen, bon-koppelingen, wachtrij en bonnen
+        # state: transacties per lijst-item, winkelboekingen (afvink), bon-koppelingen, wachtrij en bonnen,
+        # afgevinkt-tijdstip per lijst-item (voor de herinnering) en lijsten waarvoor al een herinnering is gestuurd
         self.state: dict[str, Any] = {
             "transactions": {}, "afvink": [], "mappings": {}, "queue": [], "bonnen": [],
-            "favorieten": {"vast": [], "verborgen": []},
+            "favorieten": {"vast": [], "verborgen": []}, "afgevinkt": {}, "herinnerd": [],
         }
         self._purchases: list[dict] = []
         self._purchases_ts = 0.0
@@ -42,6 +44,7 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
             data = {"transactions": old}
         for key, default in (("transactions", {}), ("afvink", []), ("mappings", {}), ("queue", []), ("bonnen", []),
                              ("favorieten", {"vast": [], "verborgen": []}), ("eigen_items", []), ("eigen_init", False),
+                             ("afgevinkt", {}), ("herinnerd", []),
                              ("aanbiedingen", {"resultaat": [], "hash": {}, "genegeerd": [], "gemeld": [], "bijgewerkt": None, "fout": {}})):
             self.state[key] = data.get(key, default)
 
@@ -80,9 +83,24 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
         stale = [k for k in self._transactions if k not in known]
         for k in stale:
             self._transactions.pop(k, None)
-        if stale:
+        if self._afgevinkt_bijwerken(data) or stale:
             self.save()
         return data
+
+    def _afgevinkt_bijwerken(self, data: GrocyData) -> bool:
+        """Bijhouden sinds wanneer een item in het mandje zit (ook als het buiten de pagina is afgevinkt)."""
+        av = self.state.setdefault("afgevinkt", {})
+        nu = time.time()
+        gewijzigd = False
+        in_mandje = {str(i.id) for i in data.items if i.done and str(i.id) not in self._transactions}
+        for k in list(av):
+            if k not in in_mandje:
+                av.pop(k)
+                gewijzigd = True
+        for k in in_mandje - set(av):
+            av[k] = nu
+            gewijzigd = True
+        return gewijzigd
 
     async def _verkeerde_winkel(self, data: GrocyData) -> None:
         """Items die Grocy zelf toevoegt (bijv. 'automatisch onder minimumvoorraad op de lijst') komen altijd op
@@ -115,21 +133,35 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
             self.save()
 
     # Lijst-acties ------------------------------------------------------------
-    async def add_text(self, list_id: int, text: str, note: str | None = None) -> None:
-        """Vrije tekst toevoegen: '2 melk' wordt product Melk, aantal 2."""
+    async def add_text(self, list_id: int, text: str, note: str | None = None, done: bool = False) -> int | None:
+        """Vrije tekst toevoegen: '2 melk' wordt product Melk, aantal 2. done=True: meteen in het mandje."""
         name, amount = parse_entry(text)
         product = match_product(name, list(self.data.products.values()))
         if product:
-            await self.add_product(list_id, int(product["id"]), amount, note)
-        else:
-            await self.api.add_list_item(list_id, None, amount, note or name)
+            return await self.add_product(list_id, int(product["id"]), amount, note, done)
+        item_id = await self.api.add_list_item(list_id, None, amount, note or name)
+        if done and item_id:
+            await self._in_mandje(item_id)
+        return item_id
 
-    async def add_product(self, list_id: int, product_id: int, amount: float, note: str | None = None) -> None:
+    async def add_product(self, list_id: int, product_id: int, amount: float, note: str | None = None,
+                          done: bool = False) -> int | None:
+        if done:
+            # vergeten af te vinken: als los item in het mandje (een open item met hetzelfde product blijft staan)
+            item_id = await self.api.add_list_item(list_id, product_id, amount, note)
+            if item_id:
+                await self._in_mandje(item_id)
+            return item_id
         existing = self.data.open_item_for_product(list_id, product_id)
         if existing:
             await self.api.update_list_item(existing.id, {"amount": existing.amount + amount})
-        else:
-            await self.api.add_list_item(list_id, product_id, amount, note)
+            return existing.id
+        return await self.api.add_list_item(list_id, product_id, amount, note)
+
+    async def _in_mandje(self, item_id: int) -> None:
+        self.state.setdefault("afgevinkt", {})[str(item_id)] = time.time()
+        await self.api.update_list_item(item_id, {"done": 1})
+        self.save()
 
     async def set_amount(self, item_id: int, amount: float) -> None:
         if amount <= 0:
@@ -138,32 +170,73 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
             await self.api.update_list_item(item_id, {"amount": amount})
 
     async def set_done(self, item_id: int, done: bool) -> None:
+        """Afvinken zet het item alleen in je mandje; de voorraad wordt pas geboekt bij afronden()."""
         item = next((i for i in self.data.items if i.id == item_id), None)
         if item is None:
             return
         key = str(item_id)
         if done:
-            # transactie-administratie is leidend: nooit twee keer boeken voor hetzelfde item
-            if item.product_id and key not in self._transactions and not item.done:
-                tx = await self.api.book_purchase(item.product_id, item.amount, self.data.location_for_list(item.list_id))
-                if tx:
-                    self._transactions[key] = tx
-                    self.state["afvink"].append({
-                        "tx": tx, "product_id": item.product_id, "amount": item.amount,
-                        "list_id": item.list_id, "ts": time.time(), "prijs": None,
-                    })
-                    self.save()
+            self.state.setdefault("afgevinkt", {}).setdefault(key, time.time())
             await self.api.update_list_item(item_id, {"done": 1})
         else:
+            self.state.setdefault("afgevinkt", {}).pop(key, None)
             tx = self._transactions.pop(key, None)
             if tx:
+                # item van vóór de afrekenwerkwijze dat al geboekt was: die boeking terugdraaien
                 try:
                     await self.api.undo_transaction(tx)
                 except GrocyError as err:
                     _LOGGER.warning("Kon aankoop van %s niet ongedaan maken: %s", item.name, err)
                 self.state["afvink"] = [a for a in self.state["afvink"] if a["tx"] != tx]
-                self.save()
             await self.api.update_list_item(item_id, {"done": 0})
+        self.save()
+
+    async def afronden(self, list_id: int) -> dict:
+        """Einde van de winkelsessie: alles in het mandje in één keer in de voorraad boeken en van de lijst halen."""
+        mandje = [i for i in self.data.items if i.list_id == list_id and i.done]
+        loc = self.data.location_for_list(list_id)
+        vandaag = datetime.now().strftime("%Y-%m-%d")
+        geboekt, zonder_product, fouten = 0, 0, []
+        for item in mandje:
+            key = str(item.id)
+            if item.product_id and key not in self._transactions:
+                try:
+                    tx = await self.api.book_purchase(item.product_id, item.amount, loc)
+                except GrocyError as err:
+                    _LOGGER.error("Boeken van %s mislukt: %s", item.name, err)
+                    fouten.append(item.name)
+                    continue  # blijft in het mandje, zodat je het opnieuw kunt proberen
+                if tx:
+                    self.state["afvink"].append({
+                        "tx": tx, "product_id": item.product_id, "amount": item.amount,
+                        "list_id": list_id, "ts": time.time(), "datum": vandaag, "prijs": None,
+                    })
+                geboekt += 1
+            elif not item.product_id:
+                zonder_product += 1
+            await self.api.delete_list_item(item.id)
+            self._transactions.pop(key, None)
+            self.state.setdefault("afgevinkt", {}).pop(key, None)
+        self.state["herinnerd"] = [x for x in self.state.get("herinnerd", []) if x != list_id]
+        self.save()
+        return {"geboekt": geboekt, "zonder_product": zonder_product, "fouten": fouten}
+
+    def vergeten_mandjes(self) -> list[dict]:
+        """Lijsten met items die al langer dan VERGETEN_NA in het mandje zitten en waarvoor nog geen melding is gestuurd."""
+        av = self.state.get("afgevinkt", {})
+        nu = time.time()
+        out = []
+        for lid, lst in self.data.lists.items():
+            mandje = [i for i in self.data.items if i.list_id == lid and i.done and str(i.id) in av]
+            if not mandje or lid in self.state.get("herinnerd", []):
+                continue
+            if nu - min(av[str(i.id)] for i in mandje) >= VERGETEN_NA:
+                out.append({"list_id": lid, "naam": lst["name"], "aantal": len(mandje)})
+        return out
+
+    def herinnering_verstuurd(self, list_id: int) -> None:
+        self.state.setdefault("herinnerd", []).append(list_id)
+        self.save()
 
     async def rename(self, item_id: int, text: str) -> None:
         item = next((i for i in self.data.items if i.id == item_id), None)
@@ -180,6 +253,7 @@ class BoodschappenCoordinator(DataUpdateCoordinator[GrocyData]):
         for item_id in item_ids:
             await self.api.delete_list_item(item_id)
             self._transactions.pop(str(item_id), None)
+            self.state.setdefault("afgevinkt", {}).pop(str(item_id), None)
         self.save()
 
     async def clear_done(self, list_id: int) -> int:

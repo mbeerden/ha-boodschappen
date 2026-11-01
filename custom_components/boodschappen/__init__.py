@@ -42,7 +42,7 @@ SERVICE_AANBIEDINGEN = "aanbiedingen_verversen"
 PANEL_URL = "boodschappen"
 ETEN_URL = "eten"
 STATIC_URL = "/boodschappen_static"
-VERSION = "0.7.2"
+VERSION = "0.8.0"
 
 BON_SCHEMA = vol.Schema(
     {
@@ -101,6 +101,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Eet-agenda synchroniseren mislukt: %s", err)
 
     entry.async_on_unload(async_track_time_interval(hass, _agenda_sync, timedelta(minutes=30)))
+
+    async def _mandje_check(_now=None) -> None:
+        for m in coordinator.vergeten_mandjes():
+            _notify_mandje(hass, m)
+            coordinator.herinnering_verstuurd(m["list_id"])
+
+    entry.async_on_unload(async_track_time_interval(hass, _mandje_check, timedelta(minutes=10)))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _register_services(hass)
@@ -205,19 +212,37 @@ def _register_services(hass: HomeAssistant) -> None:
 def _notify(hass: HomeAssistant, result: dict, open_queue: int) -> None:
     t = result["aantallen"]
     delen = []
-    for key, label in (("prijs", "prijs bijgewerkt"), ("aangevuld", "aangevuld"), ("ongepland", "ongepland geboekt"),
+    for key, label in (("prijs", "prijs bijgewerkt"), ("deels", "deels afgevinkt"), ("los", "niet afgevinkt"),
                        ("te koppelen", "te koppelen"), ("genegeerd", "genegeerd"), ("fout", "fout")):
         if t.get(key):
             delen.append(f"{t[key]} {label}")
     msg = f"**{result['winkel']}** {result.get('datum') or ''} — totaal € {result['totaal']:.2f}\n\n" + ", ".join(delen)
+    msg += "\n\nDe voorraad is niet aangepast."
+    if result.get("niet_afgevinkt"):
+        msg += (f"\n\n**{result['niet_afgevinkt']} product(en) stonden niet afgevinkt.** "
+                f"[Bekijk en kies wat in de voorraad moet](/boodschappen?tab=bonnen&bon={result['bon_id']})")
     if open_queue:
         msg += f"\n\n{open_queue} regel(s) wachten op een koppeling: [open Boodschappen → Bonnetjes](/boodschappen?tab=bonnen)"
-    else:
+    elif not result.get("niet_afgevinkt"):
         msg += "\n\n[Bekijk het overzicht](/boodschappen?tab=bonnen)"
     hass.async_create_task(
         hass.services.async_call(
             "persistent_notification", "create",
             {"title": "Bonnetje verwerkt", "message": msg, "notification_id": f"boodschappen_bon_{result['bon_id']}"},
+        )
+    )
+
+
+def _notify_mandje(hass: HomeAssistant, m: dict) -> None:
+    hass.async_create_task(
+        hass.services.async_call(
+            "persistent_notification", "create",
+            {
+                "title": f"Boodschappen {m['naam']} nog niet afgerond",
+                "message": (f"Er zitten {m['aantal']} afgevinkte producten in je mandje die nog niet in de voorraad staan.\n\n"
+                            f"[Nu verwerken](/boodschappen?tab={m['list_id']}&afronden=1)"),
+                "notification_id": f"boodschappen_mandje_{m['list_id']}",
+            },
         )
     )
 

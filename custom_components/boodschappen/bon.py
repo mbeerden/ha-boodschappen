@@ -1,8 +1,9 @@
-"""Bonnetjes verwerken: prijzen op afvink-boekingen, ongeplande aankopen boeken, onbekende regels in een wachtrij.
+"""Bonnetjes verwerken: prijzen op winkelboekingen, onbekende regels in een wachtrij. Een bon boekt NOOIT zelf voorraad.
 
-Uitgangspunt: het AFVINKEN in de winkel boekt de voorraad. Een bonnetje
-- zet de betaalde prijs op die afvink-boeking (geen extra voorraad),
-- boekt alleen wat niet (of te weinig) is afgevinkt: ongeplande aankopen,
+Uitgangspunt: AFRONDEN van de winkelsessie boekt de voorraad. Een bonnetje
+- zet de betaalde prijs op de winkelboeking van rond de bondatum (geen extra voorraad),
+- markeert wat niet (of te weinig) is afgevinkt als 'niet afgevinkt'; boeken gebeurt pas als jij dat kiest
+  (pop-up vanuit de melding, of per regel op het tabblad Bonnetjes),
 - zet regels die niet te koppelen zijn in een wachtrij, af te handelen op de Boodschappen-pagina.
 """
 from __future__ import annotations
@@ -25,7 +26,8 @@ _LOGGER = logging.getLogger(__name__)
 # Regels die nooit voorraad zijn
 NEGEER_WOORDEN = ("statiegeld", "emballage", "draagtas", "tas ", "plastic tas", "papieren tas", "lidl plus", "spaarzegel")
 KORTING_WOORDEN = ("korting", "actie", "voordeel", "bonus", "prijsverlaging", "lidl plus korting")
-AFVINK_VENSTER = 4 * 24 * 3600  # afvink-boekingen tot 4 dagen terug koppelen aan een bon
+DATUM_MARGE = 2  # winkelboekingen tot 2 dagen rond de bondatum koppelen aan een bon
+AFVINK_VENSTER = 4 * 24 * 3600  # zonder bondatum: winkelboekingen tot 4 dagen terug
 
 
 def _num(v: Any, default: float = 0.0) -> float:
@@ -131,18 +133,30 @@ class BonVerwerker:
             return int(p["id"]), 1.0, "naam"
         return None, 1.0, ""
 
+    def _kandidaten(self, pid: int, datum: str | None) -> list[dict]:
+        """Nog niet geprijsde winkelboekingen van dit product rond de bondatum (nieuwste eerst)."""
+        bondag = _date(datum)
+        nu = time.time()
+        out = []
+        for a in self.state["afvink"]:
+            if a["product_id"] != pid or a.get("prijs") is not None:
+                continue
+            if bondag:
+                dag = a.get("datum") or datetime.fromtimestamp(a["ts"]).strftime("%Y-%m-%d")
+                verschil = abs((datetime.strptime(dag, "%Y-%m-%d") - datetime.strptime(bondag, "%Y-%m-%d")).days)
+                if verschil > DATUM_MARGE:
+                    continue
+            elif nu - a["ts"] > AFVINK_VENSTER:
+                continue
+            out.append(a)
+        return sorted(out, key=lambda a: a["ts"], reverse=True)
+
     async def _apply(self, pid: int, amount: float, totaal: float, winkel: str, datum: str | None) -> dict:
-        """Prijs op afvink-boekingen zetten en het restant als ongeplande aankoop boeken."""
-        loc_id, _ = self._winkel_ids(winkel)
+        """Prijs op winkelboekingen zetten. Wat niet is afgevinkt wordt NIET geboekt, maar als 'rest' teruggegeven."""
         price = (totaal / amount) if amount > 0 and totaal > 0 else None
-        now = time.time()
-        kandidaten = sorted(
-            (a for a in self.state["afvink"] if a["product_id"] == pid and a.get("prijs") is None and now - a["ts"] <= AFVINK_VENSTER),
-            key=lambda a: a["ts"], reverse=True,
-        )
         rest = amount
         geprijsd = 0.0
-        for a in kandidaten:
+        for a in self._kandidaten(pid, datum):
             if rest <= 0.001:
                 break
             if price is not None:
@@ -153,17 +167,52 @@ class BonVerwerker:
             a["prijs"] = price if price is not None else 0
             rest -= float(a["amount"])
             geprijsd += float(a["amount"])
-        result: dict[str, Any] = {"tx": None, "geprijsd": geprijsd, "geboekt": 0.0}
-        if rest > 0.001:
-            # niet (of te weinig) afgevinkt: als ongeplande aankoop boeken, open lijst-item afvinken zonder te boeken
+        rest = round(max(rest, 0.0), 3)
+        status = "prijs" if rest <= 0.001 else ("deels" if geprijsd else "los")
+        return {"geprijsd": geprijsd, "rest": rest if rest > 0.001 else 0.0, "status": status}
+
+    async def boek(self, bon_id: str, line_ids: list[str] | None = None) -> int:
+        """Niet-afgevinkte bonregels alsnog in de voorraad boeken (alleen op jouw verzoek). None = alle open regels."""
+        bon = next((b for b in self.state["bonnen"] if b["id"] == bon_id), None)
+        if bon is None:
+            raise ValueError("Bonnetje niet gevonden")
+        loc_id, _ = self._winkel_ids(bon["winkel"])
+        await self.c.async_refresh()
+        geboekt = 0
+        for line in bon["regels"]:
+            if line.get("status") not in ("los", "deels") or (line_ids is not None and line["id"] not in line_ids):
+                continue
+            pid, rest = line.get("product_id"), float(line.get("rest") or 0)
+            if not pid or rest <= 0:
+                continue
+            price = line.get("prijs_per_eenheid")
+            try:
+                line["tx"] = await self.c.api.book_purchase(int(pid), rest, loc_id, price, _date(bon.get("datum")))
+            except GrocyError as err:
+                _LOGGER.error("Bonregel %s boeken mislukt: %s", line["tekst"], err)
+                continue
+            # staat het product nog open op een lijst, dan is het nu gekocht: van de lijst halen
             for item in self.c.data.items:
-                if item.product_id == pid and not item.done:
-                    await self.c.api.update_list_item(item.id, {"done": 1})
+                if item.product_id == int(pid) and not item.done:
+                    await self.c.api.delete_list_item(item.id)
                     break
-            result["tx"] = await self.c.api.book_purchase(pid, rest, loc_id, price, _date(datum))
-            result["geboekt"] = rest
-        result["status"] = "ongepland" if geprijsd == 0 else ("aangevuld" if result["geboekt"] else "prijs")
-        return result
+            line["status"] = "geboekt"
+            geboekt += 1
+        bon["afgehandeld"] = True
+        self.c.save()
+        await self.c.async_refresh()
+        return geboekt
+
+    def niet_boeken(self, bon_id: str, line_ids: list[str] | None = None) -> None:
+        """Niet-afgevinkte regels bewust niet boeken (pop-up 'Niet boeken')."""
+        bon = next((b for b in self.state["bonnen"] if b["id"] == bon_id), None)
+        if bon is None:
+            raise ValueError("Bonnetje niet gevonden")
+        for line in bon["regels"]:
+            if line.get("status") in ("los", "deels") and (line_ids is None or line["id"] in line_ids):
+                line["status"] = "niet geboekt" if line["status"] == "los" else "prijs"
+        bon["afgehandeld"] = True
+        self.c.save()
 
     async def verwerk(self, winkel: str, datum: str | None, bestand: str | None, regels: list[dict], opnieuw: bool = False) -> dict:
         if bestand and not opnieuw and any(b.get("bestand") == bestand for b in self.state["bonnen"]):
@@ -213,15 +262,16 @@ class BonVerwerker:
         p = self.c.data.products.get(pid, {})
         line.update({
             "product_id": pid, "grocy_naam": p.get("name"), "factor": factor, "bron": bron,
-            "status": res["status"], "tx": res["tx"], "voorraad": amount,
-            "prijs_per_eenheid": round(line["totaal"] / amount, 4) if amount else None,
+            "status": res["status"], "tx": None, "voorraad": amount, "rest": res["rest"],
+            "prijs_per_eenheid": round(line["totaal"] / amount, 4) if amount and line["totaal"] > 0 else None,
         })
 
     def samenvatting(self, bon: dict) -> dict:
         tel: dict[str, int] = {}
         for l in bon["regels"]:
             tel[l["status"]] = tel.get(l["status"], 0) + 1
-        return {"bon_id": bon["id"], "winkel": bon["winkel"], "datum": bon["datum"], "totaal": bon["totaal"], "aantallen": tel}
+        return {"bon_id": bon["id"], "winkel": bon["winkel"], "datum": bon["datum"], "totaal": bon["totaal"], "aantallen": tel,
+                "niet_afgevinkt": tel.get("los", 0) + tel.get("deels", 0)}
 
     # Koppelscherm --------------------------------------------------------
     def _queue_item(self, qid: str) -> dict:
@@ -300,7 +350,8 @@ class BonVerwerker:
             # verkeerd uitgelezen bedrag (bijv. een actiekorting op de verkeerde regel) corrigeren
             line["totaal"] = round(float(totaal), 2)
             bon["totaal"] = round(sum(l["totaal"] for l in bon["regels"] if l.get("status") != "genegeerd"), 2)
-        if line.get("tx"):
+        was_geboekt = bool(line.get("tx"))
+        if was_geboekt:
             try:
                 await self.c.api.undo_transaction(line["tx"])
             except GrocyError as err:
@@ -321,6 +372,9 @@ class BonVerwerker:
         await self.c.async_refresh()
         await self._apply_line(line, int(product_id), float(factor or 1), "handmatig", bon["winkel"], bon.get("datum"))
         self.c.save()
+        if was_geboekt and line.get("status") in ("los", "deels"):
+            # deze regel had je al in de voorraad geboekt: dan ook het nieuwe product boeken
+            await self.boek(bon["id"], [line["id"]])
         await self.c.async_refresh()
         return line
 

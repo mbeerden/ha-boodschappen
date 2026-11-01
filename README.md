@@ -3,7 +3,8 @@
 Een eenvoudige boodschappenlijst per winkel bovenop [Grocy](https://grocy.info), gemaakt voor gebruik in de winkel op je telefoon.
 
 - **Lijst per winkel** (één per Grocy-boodschappenlijst), gesorteerd op looproute via de Grocy-productgroepen (`01 …`, `02 …`).
-- **Afvinken boekt de aankoop** in de Grocy-voorraad; terugzetten maakt de boeking ongedaan.
+- **Afvinken zet een product in je mandje**; terugzetten kan altijd. Aan het einde van je winkelsessie tik je op **Afronden**: een overzicht van alles in je mandje, waar je aantallen aanpast, iets terugzet of een vergeten product toevoegt. **Klaar** boekt alles in één keer in de Grocy-voorraad. Rond je na 3 uur nog niet af, dan krijg je een melding.
+- **Winkelmodus** (knop rechtsboven, per apparaat onthouden): compacte lijst zonder toevoegbalk, favorieten en aanbiedingen, met een **+**-knop onderaan die een toevoegvenster opent. Handig bij een split screen in de winkel.
 - **Snel toevoegen** met gewone tekst (`2 komkommer`, `melk`), slim gekoppeld aan Grocy-producten.
 - **Vaak gekocht**: je meest gekochte producten van de laatste 8 weken met één tik op de lijst; vastpinnen en verbergen kan.
 - **Vaste verse boodschappen**: producten met een Grocy-gebruikersveld `wekelijks` (getal) komen met één actie op de lijst.
@@ -11,7 +12,7 @@ Een eenvoudige boodschappenlijst per winkel bovenop [Grocy](https://grocy.info),
 - **Nieuw product vanuit de lijst**: typ je iets wat nog niet in Grocy staat, dan maak je het met één tik aan, met vak (looproute) en winkel (voorstel via de AI-taak). Losse tekst op de lijst kun je ook alsnog omzetten.
 - **Productdetails (ⓘ)**: naam, vak, winkel, voorraad in huis, minimumvoorraad en vaste weekhoeveelheid aanpassen; **Op** zet de voorraad op 0 en het product op de lijst.
 - **Aanbiedingen** (inklapbaar onder de lijst; producten op je lijst die in de aanbieding zijn krijgen een label *actie*): elke ochtend worden de aanbiedingen van Lidl (via de integratie [ha-lidl](https://github.com/FaserF/ha-lidl), incl. Lidl Plus-coupons en volgende week) en Jumbo (jumbo.com) gekoppeld aan je vaste producten, met je normale prijs en een inslaadvoorstel op basis van verbruik en houdbaarheid. Koppelen gebeurt met een AI-taak (`ai_task`, bijv. Google Gemini).
-- **Bonnetjes**: actie `boodschappen.bon_verwerken` zet de betaalde prijs op afgevinkte aankopen, boekt alleen ongeplande aankopen en zet onbekende bonregels klaar om te koppelen op de pagina *Boodschappen → Bonnetjes*. Koppelingen (inclusief "stuks per bonregel") worden onthouden.
+- **Bonnetjes**: actie `boodschappen.bon_verwerken` zet de betaalde prijs op de afgeronde aankopen van rond de bondatum (ook als je de bon later toevoegt) en boekt zelf **nooit** voorraad. Wat op de bon staat maar niet was afgevinkt, zie je in een pop-up vanuit de melding; daar kies je wat alsnog in de voorraad moet. Onbekende bonregels staan klaar om te koppelen op *Boodschappen → Bonnetjes*. Koppelingen (inclusief "stuks per bonregel") worden onthouden.
 
 - **Eten** (aparte pagina `/eten`): recepten, weekmenu en beoordelingen, zonder losse receptenapp.
   - *Recepten* toevoegen via een link (schema.org-recept of paginatekst), geplakte tekst of zelf invullen; de AI-taak zet het om en koppelt de ingrediënten aan je Grocy-producten.

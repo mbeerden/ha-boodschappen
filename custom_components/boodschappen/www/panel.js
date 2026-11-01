@@ -1,4 +1,4 @@
-// Boodschappen-paneel voor Home Assistant: lijst per winkel op looproute + bonnetjes koppelen.
+// Boodschappen-paneel voor Home Assistant: lijst per winkel op looproute, afronden in de winkel + bonnetjes koppelen.
 const ROUTE_KLEUR = { lidl: "#1d5fae", jumbo: "#d39b00" };
 
 const esc = (s) =>
@@ -28,10 +28,33 @@ function zoek(products, q, max = 6) {
   return scored.sort((a, b) => b[0] - a[0]).slice(0, max).map((x) => x[1]);
 }
 
+const WINKELMODUS_KEY = "boodschappen_winkelmodus";
+const leesWinkelmodus = () => {
+  try {
+    return localStorage.getItem(WINKELMODUS_KEY) === "1";
+  } catch (_) {
+    return false;
+  }
+};
+const bewaarWinkelmodus = (aan) => {
+  try {
+    localStorage.setItem(WINKELMODUS_KEY, aan ? "1" : "0");
+  } catch (_) {}
+};
+const datumKort = (d) => {
+  if (!d) return "";
+  const x = new Date(String(d).slice(0, 10) + "T12:00:00");
+  return isNaN(x) ? String(d) : x.toLocaleDateString("nl-NL", { day: "numeric", month: "short" });
+};
+
 const STATUS = {
   prijs: ["Prijs bijgewerkt", "ok"],
+  deels: ["Deels afgevinkt", "warn"],
+  los: ["Niet afgevinkt", "warn"],
+  geboekt: ["Zelf geboekt", "info"],
+  "niet geboekt": ["Niet geboekt", "mute"],
   aangevuld: ["Prijs + extra geboekt", "ok"],
-  ongepland: ["Ongepland gekocht", "info"],
+  ongepland: ["Ongepland geboekt", "info"],
   "te koppelen": ["Te koppelen", "warn"],
   genegeerd: ["Genegeerd", "mute"],
   fout: ["Fout", "err"],
@@ -45,7 +68,10 @@ class BoodschappenPanel extends HTMLElement {
     this.data = null;
     this.tab = null;
     this.busy = false;
-    this.mandjeOpen = false;
+    this.winkel = leesWinkelmodus(); // winkelmodus: compacte lijst voor in de winkel (per apparaat)
+    this.afrekenen = false; // afrekenscherm aan het einde van de winkelsessie
+    this.lijstOpen = false; // afrekenscherm: "nog op je lijst" uitgeklapt
+    this.toast = "";
     this.dealsOpen = false;
     this.dealsAlles = false;
     this.open = {}; // bon-id -> uitgeklapt
@@ -80,8 +106,18 @@ class BoodschappenPanel extends HTMLElement {
   async _init() {
     this._shell();
     const params = new URLSearchParams(location.search);
-    this.tab = params.get("tab") === "bonnen" ? "bonnen" : null;
+    this.tab = params.get("tab") || null;
+    this.afrekenen = params.get("afronden") === "1";
+    const bon = params.get("bon");
     await this._load();
+    if (bon && this.data) this._openBonPopup(bon);
+  }
+
+  _url(mut) {
+    if (this.inKaart) return; // als dashboardkaart de URL van het dashboard niet aanpassen
+    const url = new URL(location.href);
+    mut(url.searchParams);
+    history.replaceState(null, "", url);
   }
 
   _poll() {
@@ -97,7 +133,8 @@ class BoodschappenPanel extends HTMLElement {
     } catch (e) {
       this.err = e.message || "Kan de boodschappen niet laden.";
     }
-    if (!this.tab && this.data?.lists?.length) this.tab = String(this.data.lists[0].id);
+    const geldig = (t) => t === "bonnen" || this.data?.lists?.some((l) => String(l.id) === t);
+    if ((!this.tab || !geldig(this.tab)) && this.data?.lists?.length) this.tab = String(this.data.lists[0].id);
     this._render();
   }
 
@@ -125,6 +162,22 @@ class BoodschappenPanel extends HTMLElement {
 
   _setBusy(b) {
     this.shadowRoot.querySelector(".bar")?.classList.toggle("busy", b);
+    this.shadowRoot.querySelector(".onder")?.classList.toggle("busy", b);
+  }
+
+  _toon(tekst) {
+    this.toast = tekst;
+    clearTimeout(this._toastTimer);
+    this._toastTimer = setTimeout(() => {
+      this.toast = "";
+      const t = this.shadowRoot.querySelector(".toast");
+      if (t) t.hidden = true;
+    }, 4000);
+    const t = this.shadowRoot.querySelector(".toast");
+    if (t) {
+      t.textContent = tekst;
+      t.hidden = false;
+    }
   }
 
   // ------------------------------------------------------------------ opbouw
@@ -134,10 +187,15 @@ class BoodschappenPanel extends HTMLElement {
       <header>
         <div class="menu"></div>
         <h1>Boodschappen</h1>
+        <span class="vul"></span>
+        <button class="wm" data-act="winkelmodus" aria-pressed="false" title="Winkelmodus: meer ruimte voor de lijst">
+          <span class="wm-icoon" aria-hidden="true">🛒</span><span class="wm-tekst">Winkelmodus</span></button>
       </header>
       <nav class="tabs" role="tablist"></nav>
       <div class="bar"></div>
       <div class="main"></div>
+      <div class="toast" role="status" hidden></div>
+      <div class="onder"></div>
       <div class="modal" hidden></div>`;
     const menu = document.createElement("ha-menu-button");
     menu.hass = this._hass;
@@ -173,11 +231,28 @@ class BoodschappenPanel extends HTMLElement {
       }</button>`;
 
     const bar = root.querySelector(".bar");
+    const onder = root.querySelector(".onder");
+    const lijstTab = this.tab !== "bonnen";
+    if (!lijstTab) this.afrekenen = false;
+    this.classList.toggle("winkel", this.winkel && lijstTab);
+    const wm = root.querySelector(".wm");
+    wm.hidden = !lijstTab;
+    wm.setAttribute("aria-pressed", String(this.winkel));
+    wm.classList.toggle("aan", this.winkel);
     if (this.tab === "bonnen") {
       bar.innerHTML = "";
       bar.className = "bar";
+      onder.innerHTML = "";
       main.innerHTML = this._bonnen();
+    } else if (this.afrekenen) {
+      bar.classList.add("weg");
+      const lst = d.lists.find((l) => String(l.id) === this.tab);
+      main.style.setProperty("--route", this._kleur(lst?.name));
+      onder.style.setProperty("--route", this._kleur(lst?.name));
+      main.innerHTML = this._afrekenscherm(Number(this.tab), lst);
+      onder.innerHTML = this._onderAfrekenen(Number(this.tab));
     } else {
+      bar.classList.toggle("weg", this.winkel);
       if (!bar.querySelector("input")) {
         bar.innerHTML = `
           <div class="add">
@@ -192,7 +267,12 @@ class BoodschappenPanel extends HTMLElement {
       bar.style.setProperty("--route", this._kleur(lst?.name));
       main.innerHTML = this._lijst(Number(this.tab));
       main.style.setProperty("--route", this._kleur(lst?.name));
+      onder.style.setProperty("--route", this._kleur(lst?.name));
+      onder.innerHTML = this._onderLijst(Number(this.tab));
     }
+    const t = root.querySelector(".toast");
+    t.hidden = !this.toast;
+    t.textContent = this.toast;
     if (this.err) main.insertAdjacentHTML("afterbegin", `<p class="fout">${esc(this.err)}</p>`);
   }
 
@@ -236,7 +316,9 @@ class BoodschappenPanel extends HTMLElement {
     );
     let html = "";
     if (!todo.length) {
-      html += `<div class="leeg"><p>Niets meer te halen hier.</p><p>Voeg hierboven iets toe, of vul de lijst aan:</p></div>`;
+      html += this.winkel
+        ? `<div class="leeg"><p>Alles is afgevinkt.${klaar.length ? " Rond je boodschappen af met de knop onderaan." : ""}</p></div>`
+        : `<div class="leeg"><p>Niets meer te halen hier.</p><p>Voeg hierboven iets toe, of vul de lijst aan:</p></div>`;
     } else {
       html += `<ol class="route">${groepen
         .map(
@@ -247,23 +329,215 @@ class BoodschappenPanel extends HTMLElement {
         )
         .join("")}<li class="stop eind"><h2><span>Kassa</span></h2></li></ol>`;
     }
+    if (this.winkel) return html;
     html += this._aanbiedingen(lid);
     html += `<div class="acties">
         <button data-act="weekvast">Vaste verse boodschappen toevoegen</button>
         <button data-act="tekorten">Tekorten aanvullen</button>
       </div>`;
-    if (klaar.length) {
-      html += `<section class="mandje ${this.mandjeOpen ? "open" : ""}">
-        <button class="kop" data-act="mandje" aria-expanded="${this.mandjeOpen}">In je mandje <b>${klaar.length}</b></button>
+    return html;
+  }
+
+  // ---------------------------------------------------------------- mandje en afronden
+  _mandje(lid) {
+    return this.data.items.filter((i) => i.list_id === lid && i.done);
+  }
+
+  _onderLijst(lid) {
+    const n = this._mandje(lid).length;
+    if (!n && !this.winkel) return "";
+    const plus = this.winkel
+      ? `<button class="fab" data-act="toevoegen" aria-label="Product toevoegen" title="Product toevoegen">+</button>`
+      : "";
+    if (!n) return `<div class="onder-rij"><span class="mandje-n leeg">Mandje is leeg</span>${plus}</div>`;
+    return `<div class="onder-rij">
+        <button class="mandje-n" data-act="afrekenen"><b>${n}</b> in je mandje</button>
+        <button class="primary afronden" data-act="afrekenen">Afronden</button>${plus}
+      </div>`;
+  }
+
+  _onderAfrekenen(lid) {
+    const mandje = this._mandje(lid);
+    const metProduct = mandje.filter((i) => i.product_id).length;
+    return `<div class="onder-rij">
+        <button class="sec-btn" data-act="afrterug">Terug</button>
+        <button class="primary afronden breed" data-act="klaar" ${mandje.length ? "" : "disabled"}>
+          Klaar${metProduct ? ` · ${metProduct} in voorraad boeken` : ""}</button>
+      </div>`;
+  }
+
+  _afrekenscherm(lid, lst) {
+    const mandje = this._mandje(lid);
+    const open = this.data.items.filter((i) => i.list_id === lid && !i.done);
+    let html = `<h2 class="sec afr-titel">Afronden · ${esc(lst?.name || "")}</h2>
+      <p class="uitleg">Controleer wat je gekocht hebt. Pas aantallen aan of zet iets terug op de lijst.
+        Met <b>Klaar</b> gaat alles in één keer in de voorraad.</p>`;
+    if (!mandje.length) {
+      html += `<p class="leeg">Je mandje is leeg. Vink producten af op de lijst, of voeg hieronder iets toe.</p>`;
+    } else {
+      html += `<ul class="afr">${mandje
+        .map(
+          (i) => `<li class="item afr-item">
+            <span class="txt"><span class="naam">${esc(i.name)}</span>${
+              i.product_id
+                ? ""
+                : `<small class="geen-vrd">Geen Grocy-product: telt niet mee in de voorraad.
+                   <button class="link inline" data-act="maakprod" data-id="${i.id}" data-naam="${esc(i.name)}">Product maken</button></small>`
+            }</span>
+            <span class="stepper">
+              <button data-act="min" data-id="${i.id}" data-amount="${i.amount}" ${i.amount <= 1 ? "disabled" : ""} aria-label="Minder ${esc(i.name)}">−</button>
+              <span class="n">${fmtNum(i.amount)}</span>
+              <button data-act="plus" data-id="${i.id}" data-amount="${i.amount}" aria-label="Meer ${esc(i.name)}">+</button>
+            </span>
+            <button class="terug" data-act="vink" data-id="${i.id}" data-done="0" aria-label="${esc(i.name)} terug op de lijst" title="Terug op de lijst">↩</button>
+          </li>`
+        )
+        .join("")}</ul>`;
+    }
+    html += `<button class="sec-btn vergeten" data-act="toevoegen">+ Iets vergeten af te vinken</button>`;
+    if (open.length) {
+      html += `<section class="mandje ${this.lijstOpen ? "open" : ""}">
+        <button class="kop" data-act="lijstopen" aria-expanded="${this.lijstOpen}">Nog op je lijst <b>${open.length}</b></button>
         ${
-          this.mandjeOpen
-            ? `<ul>${klaar.map((i) => this._item(i)).join("")}</ul>
-               <button class="wis" data-act="wis" data-list="${lid}">Afgevinkte verwijderen</button>`
+          this.lijstOpen
+            ? `<p class="hint">Tik op een product dat je toch hebt gekocht.</p>
+               <ul>${open
+                 .map(
+                   (i) => `<li class="item"><button class="vink" data-act="vink" data-id="${i.id}" data-done="1" aria-label="${esc(i.name)} in je mandje">
+                       <span class="box" aria-hidden="true"></span><span class="txt"><span class="naam">${esc(i.name)}</span></span></button>
+                       <span class="n">${fmtNum(i.amount)}</span></li>`
+                 )
+                 .join("")}</ul>`
             : ""
         }
       </section>`;
     }
     return html;
+  }
+
+  async _klaar() {
+    const lid = Number(this.tab);
+    const res = await this._do({ type: "boodschappen/afronden", list_id: lid }, false);
+    if (!res) return;
+    const delen = [`${res.geboekt} ${res.geboekt === 1 ? "product" : "producten"} in de voorraad geboekt`];
+    if (res.zonder_product) delen.push(`${res.zonder_product} zonder Grocy-product`);
+    if (res.fouten?.length) delen.push(`niet gelukt: ${res.fouten.join(", ")} (staat nog in je mandje)`);
+    this.afrekenen = false;
+    if (!res.fouten?.length) {
+      this.winkel = false;
+      bewaarWinkelmodus(false);
+    }
+    this._url((p) => p.delete("afronden"));
+    this._toon(delen.join(" · "));
+    this._render();
+  }
+
+  // ---------------------------------------------------------------- toevoegen-venster (winkelmodus / afrekenen)
+  _openToevoegen() {
+    const inMandje = this.afrekenen;
+    this.modal = { soort: "toevoegen", done: inMandje };
+    const favs = (this.data.favorieten || {})[this.tab] || [];
+    this._toonModal(`
+      <h2>${inMandje ? "Toevoegen aan je mandje" : "Toevoegen aan de lijst"}</h2>
+      <div class="add"><input class="m-zoek" type="text" autocomplete="off" enterkeyhint="done"
+        placeholder="Zoek of typ, bijv. 2 komkommer" aria-label="Product zoeken"></div>
+      <div class="sugg m-sugg" role="listbox"></div>
+      ${
+        favs.length
+          ? `<div class="favkop"><span>Vaak gekocht</span></div>
+             <div class="chips-wrap">${favs
+               .map((f) => `<button class="favchip ${f.pinned ? "pin" : ""}" data-act="mkies" data-pid="${f.id}" data-amount="${f.amount}">${esc(f.name)}${
+                 f.amount !== 1 ? ` <b>×${fmtNum(f.amount)}</b>` : ""}</button>`)
+               .join("")}</div>`
+          : ""
+      }
+      <div class="knoppen"><span class="vul"></span>
+        <button class="sec-btn" data-act="modsluit">Sluiten</button>
+        <button class="primary" data-act="mtekst">Toevoegen</button></div>`);
+    this.shadowRoot.querySelector(".m-zoek").focus();
+  }
+
+  _modalSuggest(val) {
+    const box = this.shadowRoot.querySelector(".m-sugg");
+    if (!box) return;
+    const q = val.replace(/^\s*\d+([.,]\d+)?\s*x?\s*/i, "");
+    const res = q.length >= 2 ? zoek(this.data.products, q, 6) : [];
+    const exact = res.some((p) => norm(p.name) === norm(q));
+    box.innerHTML =
+      res.map((p) => `<button role="option" data-act="mkies" data-pid="${p.id}">${esc(p.name)}</button>`).join("") +
+      (q.trim().length >= 2 && !exact && !this.modal?.done
+        ? `<button class="nieuwprod" data-act="mnieuw" data-naam="${esc(q.trim())}">+ Nieuw product: ${esc(q.trim())}</button>`
+        : "");
+  }
+
+  async _modalToevoegen(pid, vasteAmount) {
+    const inp = this.shadowRoot.querySelector(".m-zoek");
+    const val = (inp?.value || "").trim();
+    if (!pid && !val) return inp?.focus();
+    const m = val.match(/^\s*(\d+(?:[.,]\d+)?)/);
+    const msg = { type: "boodschappen/item_add", list_id: Number(this.tab), done: !!this.modal?.done };
+    let naam = val;
+    if (pid) {
+      msg.product_id = pid;
+      msg.amount = m ? Number(m[1].replace(",", ".")) : vasteAmount || 1;
+      naam = this.data.products.find((p) => p.id === pid)?.name || "Product";
+    } else msg.text = val;
+    this._sluitModal();
+    await this._do(msg);
+    if (!this.err) this._toon(`${naam} ${msg.done ? "in je mandje" : "op de lijst"}`);
+  }
+
+  // ---------------------------------------------------------------- pop-up bonnetje (vanuit de melding)
+  _openBonPopup(bonId) {
+    const b = (this.data.bonnen || []).find((x) => x.id === bonId);
+    this.tab = "bonnen";
+    this._render();
+    if (!b) {
+      this.modal = { soort: "bon" };
+      this._toonModal(`<h2>Bonnetje niet gevonden</h2><p class="uitleg">Dit bonnetje staat niet (meer) in het overzicht.</p>
+        <div class="knoppen"><span class="vul"></span><button class="sec-btn" data-act="modsluit">Sluiten</button></div>`);
+      return;
+    }
+    this.open[b.id] = true;
+    const los = b.regels.filter((r) => r.status === "los" || r.status === "deels");
+    this.modal = { soort: "bon", bon: b.id };
+    if (!los.length) {
+      this._toonModal(`<h2>${esc(b.winkel)} · ${esc(datumKort(b.datum || b.verwerkt))}</h2>
+        <p class="uitleg">Alles van dit bonnetje is al afgehandeld. De prijzen staan in Grocy.</p>
+        <div class="knoppen"><span class="vul"></span><button class="sec-btn" data-act="modsluit">Sluiten</button></div>`);
+      return;
+    }
+    this._toonModal(`
+      <h2>${esc(b.winkel)} · ${esc(datumKort(b.datum || b.verwerkt))}</h2>
+      <p class="uitleg">Deze producten stonden op de bon, maar waren niet (of niet allemaal) afgevinkt en staan dus niet in de voorraad.
+        Vink aan wat er wél in moet.</p>
+      <ul class="kieslijst">${los
+        .map(
+          (r) => `<li><label>
+            <input type="checkbox" class="bk" value="${esc(r.id)}" checked>
+            <span class="txt"><span class="naam">${esc(r.grocy_naam || r.tekst)}</span>
+              <small>${r.status === "deels" ? `${fmtNum(r.rest)} meer dan afgevinkt` : `${fmtNum(r.rest)} stuks`} · ${euro(r.totaal)} · <code>${esc(r.tekst)}</code></small></span>
+          </label></li>`
+        )
+        .join("")}</ul>
+      <div class="knoppen">
+        <button class="sec-btn" data-act="bonniets">Niets boeken</button>
+        <span class="vul"></span>
+        <button class="primary" data-act="bonboeksel">In voorraad boeken</button></div>`);
+  }
+
+  async _bonPopupBoek(niets) {
+    const m = this.shadowRoot.querySelector(".modal");
+    const bonId = this.modal?.bon;
+    const alle = [...m.querySelectorAll(".bk")];
+    const ja = niets ? [] : alle.filter((c) => c.checked).map((c) => c.value);
+    const nee = alle.map((c) => c.value).filter((id) => !ja.includes(id));
+    this._sluitModal();
+    this._url((p) => p.delete("bon"));
+    let n = 0;
+    if (ja.length) n = (await this._do({ type: "boodschappen/bon_boek", bon_id: bonId, line_ids: ja })) || 0;
+    if (nee.length) await this._do({ type: "boodschappen/bon_niet_boeken", bon_id: bonId, line_ids: nee });
+    this._toon(n ? `${n} ${n === 1 ? "product" : "producten"} in de voorraad geboekt` : "Niets geboekt; de prijzen zijn wel bijgewerkt");
   }
 
   _aanbiedingen(lid) {
@@ -359,6 +633,8 @@ class BoodschappenPanel extends HTMLElement {
           <span class="t">${euro(b.totaal)}</span>
           <span class="chips">${samenv}</span>
         </button>
+        ${open && b.regels.some((r) => r.status === "los" || r.status === "deels")
+          ? `<button class="sec-btn klein bonlos" data-act="bonpopup" data-id="${b.id}">Niet afgevinkt: kiezen wat in de voorraad moet</button>` : ""}
         ${open ? `<ul class="regels">${b.regels.map((r) => this._bonregel(b, r)).join("")}</ul>` : ""}
       </article>`;
     }
@@ -380,6 +656,8 @@ class BoodschappenPanel extends HTMLElement {
       <div class="rij2">
         <span class="chip ${st[1]}">${esc(st[0])}</span>
         <span class="doel">${doel}</span>
+        ${(r.status === "los" || r.status === "deels") && r.product_id
+          ? `<button class="sec-btn klein" data-act="bonboek" data-bon="${b.id}" data-line="${r.id}" title="${fmtNum(r.rest)} in de voorraad boeken">Boek ${fmtNum(r.rest)}</button>` : ""}
         ${r.status !== "te koppelen" ? `<button class="link" data-act="herkoppel" data-bon="${b.id}" data-line="${r.id}">${editing ? "Annuleren" : "Wijzigen"}</button>` : ""}
       </div>
       ${editing ? this._kiezer({ key: `e:${b.id}:${r.id}`, suggestie: r.grocy_naam || r.tekst, factor: r.factor || 1, mode: "herkoppel", bon: b.id, line: r.id, totaal: r.totaal }) : ""}
@@ -450,6 +728,7 @@ class BoodschappenPanel extends HTMLElement {
   _input(e) {
     const t = e.target;
     if (t.id === "add") this._suggest(t.value);
+    if (t.classList.contains("m-zoek")) this._modalSuggest(t.value);
     if (t.classList.contains("pzoek")) {
       const k = t.closest(".kiezer");
       const res = zoek(this.data.products, t.value || "", 6);
@@ -463,6 +742,10 @@ class BoodschappenPanel extends HTMLElement {
     if (e.key === "Enter" && e.target.id === "add") {
       e.preventDefault();
       this._add();
+    }
+    if (e.key === "Enter" && e.target.classList.contains("m-zoek")) {
+      e.preventDefault();
+      this._modalToevoegen();
     }
   }
 
@@ -498,6 +781,7 @@ class BoodschappenPanel extends HTMLElement {
   }
 
   _sluitModal() {
+    if (this.modal?.soort === "bon") this._url((p) => p.delete("bon"));
     this.modal = null;
     const m = this.shadowRoot.querySelector(".modal");
     m.hidden = true;
@@ -616,16 +900,66 @@ class BoodschappenPanel extends HTMLElement {
     if (b.dataset.tab) {
       this.tab = b.dataset.tab;
       this.edit = null;
-      const url = new URL(location.href);
-      if (this.tab === "bonnen") url.searchParams.set("tab", "bonnen");
-      else url.searchParams.delete("tab");
-      history.replaceState(null, "", url);
+      this.afrekenen = false;
+      this._url((p) => {
+        if (this.tab === "bonnen") p.set("tab", "bonnen");
+        else p.delete("tab");
+        p.delete("afronden");
+        p.delete("bon");
+      });
       this._render();
       this.shadowRoot.querySelector(".main").scrollTop = 0;
       return;
     }
     const id = Number(b.dataset.id);
     switch (act) {
+      case "winkelmodus":
+        this.winkel = !this.winkel;
+        bewaarWinkelmodus(this.winkel);
+        this._render();
+        this.shadowRoot.querySelector(".main").scrollTop = 0;
+        return;
+      case "afrekenen":
+        this.afrekenen = true;
+        this._url((p) => {
+          p.set("tab", this.tab);
+          p.set("afronden", "1");
+        });
+        this._render();
+        this.shadowRoot.querySelector(".main").scrollTop = 0;
+        return;
+      case "afrterug":
+        this.afrekenen = false;
+        this._url((p) => p.delete("afronden"));
+        return this._render();
+      case "klaar":
+        return this._klaar();
+      case "lijstopen":
+        this.lijstOpen = !this.lijstOpen;
+        return this._render();
+      case "toevoegen":
+        return this._openToevoegen();
+      case "mkies":
+        return this._modalToevoegen(Number(b.dataset.pid), Number(b.dataset.amount) || 1);
+      case "mtekst":
+        return this._modalToevoegen();
+      case "mnieuw": {
+        const inp = this.shadowRoot.querySelector(".m-zoek");
+        const m = (inp?.value || "").match(/^\s*(\d+(?:[.,]\d+)?)/);
+        this._sluitModal();
+        return this._openNieuw(b.dataset.naam, null, m ? Number(m[1].replace(",", ".")) : 1);
+      }
+      case "bonpopup":
+        return this._openBonPopup(b.dataset.id);
+      case "bonboeksel":
+        return this._bonPopupBoek(false);
+      case "bonniets":
+        return this._bonPopupBoek(true);
+      case "bonboek": {
+        const n = await this._do({ type: "boodschappen/bon_boek", bon_id: b.dataset.bon, line_ids: [b.dataset.line] });
+        if (n) this._toon("In de voorraad geboekt");
+        return;
+      }
       case "nieuwprod": {
         const inp = this.shadowRoot.getElementById("add");
         const m = (inp?.value || "").match(/^\s*(\d+(?:[.,]\d+)?)/);
@@ -651,7 +985,7 @@ class BoodschappenPanel extends HTMLElement {
         return this._add(Number(b.dataset.pid));
       case "vink": {
         const li = b.closest(".item");
-        li.classList.add("bezig");
+        li?.classList.add("bezig");
         return this._do({ type: "boodschappen/item_done", item_id: id, done: b.dataset.done === "1" });
       }
       case "plus":
@@ -676,9 +1010,6 @@ class BoodschappenPanel extends HTMLElement {
         return this._render();
       case "dealsalles":
         this.dealsAlles = !this.dealsAlles;
-        return this._render();
-      case "mandje":
-        this.mandjeOpen = !this.mandjeOpen;
         return this._render();
       case "wis":
         return this._do({ type: "boodschappen/clear_done", list_id: Number(b.dataset.list) });
@@ -764,7 +1095,65 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
 header { display: flex; align-items: center; gap: 4px; height: var(--header-height, 56px); padding: 0 12px 0 4px;
   background: var(--app-header-background-color, var(--primary-color)); color: var(--app-header-text-color, #fff); flex: none; }
-header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; }
+header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; white-space: nowrap; }
+header .vul { flex: 1; }
+.wm { display: flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; border-radius: 18px; font-size: 14px;
+  border: 1px solid color-mix(in srgb, currentColor 40%, transparent); }
+.wm.aan { background: var(--app-header-text-color, #fff); color: var(--app-header-background-color, var(--primary-color)); border-color: transparent; font-weight: 600; }
+.wm[hidden] { display: none; }
+@media (max-width: 380px) { .wm-tekst { display: none; } }
+.bar.weg { display: none; }
+
+/* Winkelmodus: zo veel mogelijk ruimte voor de lijst (split screen) */
+:host(.winkel) header { height: 44px; }
+:host(.winkel) header h1 { font-size: 16px; }
+:host(.winkel) .tabs { padding-top: 0; }
+:host(.winkel) .tabs button { padding: 8px 12px 9px; }
+:host(.winkel) .main { padding-top: 2px; padding-bottom: 16px; }
+:host(.winkel) .item { min-height: 46px; margin-bottom: 4px; }
+:host(.winkel) .vink { min-height: 46px; padding-top: 6px; padding-bottom: 6px; }
+:host(.winkel) .naam { font-size: 16px; }
+:host(.winkel) .stop h2 { padding: 4px 0 2px; }
+:host(.winkel) .stepper button { height: 38px; }
+:host(.winkel) button.info { height: 38px; }
+
+/* Onderbalk: mandje en afronden */
+.onder { flex: none; position: relative; background: var(--card-background-color); border-top: 1px solid var(--rand);
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px)); }
+.onder:empty { display: none; }
+.onder.busy::after { content: ""; position: absolute; left: 0; top: -1px; height: 2px; width: 30%; background: var(--route); animation: laden 1s ease-in-out infinite; }
+.onder-rij { display: flex; align-items: center; gap: 8px; max-width: 640px; margin: 0 auto; }
+.mandje-n { flex: 1; text-align: left; font-size: 15px; padding: 8px 2px; }
+.mandje-n b { display: inline-block; min-width: 24px; padding: 2px 7px; margin-right: 4px; border-radius: 12px; background: var(--route); color: #fff; text-align: center; }
+.mandje-n.leeg { color: var(--secondary-text-color); }
+.primary.afronden { background: var(--route); padding: 0 22px; }
+.primary.afronden.breed { flex: 1; }
+.primary:disabled { opacity: .45; cursor: default; }
+.fab { flex: none; width: 48px; height: 48px; border-radius: 50%; background: var(--route); color: #fff; font-size: 30px; line-height: 1;
+  box-shadow: 0 2px 6px rgba(0,0,0,.3); }
+.toast { position: absolute; left: 50%; bottom: 76px; transform: translateX(-50%); z-index: 5; max-width: calc(100% - 32px);
+  background: var(--primary-text-color); color: var(--primary-background-color); padding: 10px 16px; border-radius: 10px; font-size: 14px;
+  box-shadow: 0 2px 10px rgba(0,0,0,.3); }
+.toast[hidden] { display: none; }
+
+/* Afrekenscherm */
+.afr-titel { margin-top: 10px; }
+.afr { list-style: none; margin: 0 0 8px; padding: 0; }
+.afr-item { padding-left: 14px; }
+.afr-item .txt { flex: 1; padding: 8px 0; }
+.geen-vrd { color: var(--warning-color, #b26a00) !important; }
+.link.inline { margin: 0; padding: 0 0 0 4px; font-size: 13px; }
+.terug { flex: none; width: 40px; height: 44px; margin-right: 4px; border-radius: 10px; font-size: 20px; color: var(--secondary-text-color); }
+.terug:active { background: var(--zacht); }
+.stepper button:disabled { opacity: .3; cursor: default; }
+.vergeten { margin: 4px 0 8px; border-style: dashed; color: var(--route); }
+.chips-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
+.kieslijst { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.kieslijst label { display: flex; align-items: flex-start; gap: 12px; padding: 10px 12px; border-radius: 12px; background: var(--zacht); cursor: pointer; }
+.kieslijst input { width: 22px; height: 22px; margin: 1px 0 0; accent-color: var(--primary-color); flex: none; }
+.kieslijst code { font-size: 12px; }
+.bonlos { margin: 10px 0 0; border-color: var(--warning-color, #f0a020); }
+.sec-btn.klein { padding: 6px 12px; font-size: 13px; }
 .tabs { display: flex; gap: 4px; padding: 8px 12px 0; background: var(--card-background-color); border-bottom: 1px solid var(--rand); overflow-x: auto; flex: none; }
 .tabs button { position: relative; padding: 12px 14px 13px; display: flex; align-items: center; gap: 8px; color: var(--secondary-text-color); font-weight: 500; white-space: nowrap; }
 .tabs button.on { color: var(--primary-text-color); }
@@ -795,7 +1184,7 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; }
 .favchip.pin { border-color: var(--route); border-width: 2px; padding: 8px 12px; }
 .favchip.edit { padding: 6px 6px 6px 12px; }
 .favchip.edit button { font-size: 12px; padding: 5px 8px; border-radius: 14px; background: var(--zacht); }
-.main { flex: 1; overflow-y: auto; padding: 8px 12px 96px; -webkit-overflow-scrolling: touch; }
+.main { flex: 1; overflow-y: auto; padding: 8px 12px 32px; -webkit-overflow-scrolling: touch; }
 .fout { background: color-mix(in srgb, var(--error-color, #c00) 15%, transparent); color: var(--primary-text-color); padding: 10px 12px; border-radius: 10px; }
 .leeg, .rust { color: var(--secondary-text-color); padding: 12px 4px 0; }
 .leeg p { margin: 0 0 6px; }
@@ -840,9 +1229,9 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; }
 .wis { color: var(--error-color, #c62828); border-color: color-mix(in srgb, var(--error-color, #c62828) 40%, transparent); }
 
 /* Productvensters */
-.info { flex: none; width: 36px; height: 44px; margin-right: 4px; border-radius: 10px; font-size: 18px; color: var(--secondary-text-color); }
-.info.nieuw { font-size: 22px; color: var(--route); font-weight: 600; }
-.info:active { background: var(--zacht); }
+button.info { flex: none; width: 36px; height: 44px; margin-right: 4px; border-radius: 10px; font-size: 18px; color: var(--secondary-text-color); }
+button.info.nieuw { font-size: 22px; color: var(--route); font-weight: 600; }
+button.info:active { background: var(--zacht); }
 .sugg .nieuwprod { border-style: dashed; color: var(--route); font-weight: 500; }
 .modal { position: absolute; inset: 0; z-index: 10; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; justify-content: center; }
 .modal[hidden] { display: none; }
@@ -907,7 +1296,7 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; }
 .bonkop .d { color: var(--secondary-text-color); font-size: 14px; }
 .bonkop .t { font-variant-numeric: tabular-nums; font-weight: 600; }
 .bonkop .chips { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-.chip { font-size: 12px; padding: 3px 8px; border-radius: 10px; background: var(--zacht); white-space: nowrap; }
+.chip { display: inline-block; font-size: 12px; line-height: 1.5; padding: 2px 8px; border-radius: 10px; background: var(--zacht); white-space: nowrap; }
 .chip.ok { background: color-mix(in srgb, var(--success-color, #2e7d32) 18%, transparent); }
 .chip.info { background: color-mix(in srgb, var(--info-color, #1e88e5) 18%, transparent); }
 .chip.warn { background: color-mix(in srgb, var(--warning-color, #f0a020) 28%, transparent); }
@@ -919,7 +1308,7 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; }
 .doel em { font-style: normal; color: var(--secondary-text-color); font-size: 13px; }
 .link { margin-left: auto; color: var(--primary-color); font-size: 14px; padding: 6px 2px; }
 @media (min-width: 700px) {
-  .main { padding: 12px 24px 96px; }
+  .main { padding: 12px 24px 32px; }
   .main > *, .bar > * { max-width: 640px; margin-left: auto; margin-right: auto; }
 }
 `;

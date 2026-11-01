@@ -142,7 +142,8 @@ def make_coordinator(items):
     c.api = FakeApi(items)
     from custom_components.boodschappen.bon import BonVerwerker
     c._store = FakeStore()
-    c.state = {"transactions": {}, "afvink": [], "mappings": {}, "queue": [], "bonnen": [], "favorieten": {"vast": [], "verborgen": []}}
+    c.state = {"transactions": {}, "afvink": [], "mappings": {}, "queue": [], "bonnen": [], "favorieten": {"vast": [], "verborgen": []},
+               "afgevinkt": {}, "herinnerd": []}
     c._purchases = []
     c._purchases_ts = 0
     c.data = make_data(items)
@@ -172,20 +173,64 @@ def test_add_text_matches_and_merges():
     assert c.api.calls[-1] == ("add", 1, None, 1.0, "appeltaart")
 
 
-def test_check_books_purchase_and_uncheck_undoes():
+def test_check_only_marks_and_afronden_books_once():
     c = make_coordinator([{"id": 1, "product_id": 245, "amount": 2, "shopping_list_id": 2, "done": 0},
-                          {"id": 2, "product_id": None, "note": "Taart", "amount": 1, "shopping_list_id": 1, "done": 0}])
+                          {"id": 2, "product_id": None, "note": "Taart", "amount": 1, "shopping_list_id": 2, "done": 0},
+                          {"id": 3, "product_id": 70, "amount": 6, "shopping_list_id": 2, "done": 0},
+                          {"id": 4, "product_id": 8, "amount": 1, "shopping_list_id": 1, "done": 0}])
     run(c.set_done(1, True))
-    assert ("purchase", 245, 2.0, 2) in c.api.calls
-    assert c.api.items[1]["done"] == 1
-    assert c._transactions == {"1": "tx1"}
+    run(c.set_done(2, True))
+    run(c.set_done(3, True))
+    run(c.set_done(4, True))                    # andere winkel: blijft buiten deze afronding
+    assert not [x for x in c.api.calls if x[0] == "purchase"]     # afvinken boekt niets meer
+    assert c.api.items[1]["done"] == 1 and set(c.state["afgevinkt"]) == {"1", "2", "3", "4"}
     refresh(c)
-    run(c.set_done(1, True))  # nogmaals afvinken: niet dubbel boeken
-    assert sum(1 for x in c.api.calls if x[0] == "purchase") == 1
+    run(c.set_done(3, False))                   # foutje in de winkel: terugzetten, zonder Grocy-boeking
+    assert c.api.items[3]["done"] == 0 and not [x for x in c.api.calls if x[0] in ("purchase", "undo")]
+    refresh(c)
+    run(c.set_amount(1, 3))                     # in het afrekenscherm aantal aanpassen
+    refresh(c)
+    res = run(c.afronden(2))
+    assert res == {"geboekt": 1, "zonder_product": 1, "fouten": []}
+    assert [x for x in c.api.calls if x[0] == "purchase"] == [("purchase", 245, 3.0, 2)]
+    assert set(c.api.items) == {3, 4}           # mandje van de lijst gehaald; open item en andere winkel blijven
+    assert c.state["afvink"][0]["datum"] and c.state["afvink"][0]["amount"] == 3.0
+    assert set(c.state["afgevinkt"]) == {"4"}
+    refresh(c)
+    assert run(c.afronden(2))["geboekt"] == 0   # nogmaals: niets dubbel
+
+
+def test_afronden_legacy_booked_item_not_double():
+    c = make_coordinator([{"id": 1, "product_id": 245, "amount": 2, "shopping_list_id": 2, "done": 1}])
+    c.state["transactions"] = {"1": "oud"}      # al geboekt onder de oude werkwijze
+    assert run(c.afronden(2))["geboekt"] == 0 and not [x for x in c.api.calls if x[0] == "purchase"]
+
+
+def test_unchecking_legacy_booked_item_undoes():
+    c = make_coordinator([{"id": 1, "product_id": 245, "amount": 2, "shopping_list_id": 2, "done": 1}])
+    c.state["transactions"] = {"1": "oud"}
     run(c.set_done(1, False))
-    assert ("undo", "tx1") in c.api.calls and c.api.items[1]["done"] == 0 and c._transactions == {}
-    run(c.set_done(2, True))  # notitie-item: geen voorraadboeking
-    assert sum(1 for x in c.api.calls if x[0] == "purchase") == 1
+    assert ("undo", "oud") in c.api.calls and c.state["transactions"] == {}
+
+
+def test_add_done_goes_to_basket():
+    c = make_coordinator([{"id": 1, "product_id": 70, "amount": 6, "shopping_list_id": 1, "done": 0}])
+    run(c.add_text(1, "2 eieren", done=True))   # vergeten af te vinken: los in het mandje, open item blijft
+    assert c.api.items[1]["amount"] == 6 and c.api.items[101]["done"] == 1 and c.api.items[101]["amount"] == 2
+    assert "101" in c.state["afgevinkt"]
+
+
+def test_vergeten_mandje_herinnering():
+    import time as _t
+    c = make_coordinator([{"id": 1, "product_id": 245, "amount": 2, "shopping_list_id": 2, "done": 1}])
+    c._afgevinkt_bijwerken(c.data)
+    assert c.vergeten_mandjes() == []           # net afgevinkt
+    c.state["afgevinkt"]["1"] = _t.time() - 4 * 3600
+    assert c.vergeten_mandjes() == [{"list_id": 2, "naam": "Jumbo", "aantal": 1}]
+    c.herinnering_verstuurd(2)
+    assert c.vergeten_mandjes() == []           # maar één keer melden
+    run(c.afronden(2))
+    assert c.state["herinnerd"] == []
 
 
 def test_weekly_and_missing():
@@ -225,43 +270,92 @@ def test_prepare_lines_discount_and_ignore():
     assert _date("03-10-2026") == "2026-10-03" and _date("2026-10-03") == "2026-10-03" and _date("onzin") is None
 
 
-def test_bon_prices_checked_off_and_books_unplanned():
+def _winkelen(c, item_ids, list_id=1, dagen_terug=0):
+    import time as _t
+    for i in item_ids:
+        run(c.set_done(i, True))
+    refresh(c)
+    run(c.afronden(list_id))
+    if dagen_terug:
+        for a in c.state["afvink"]:
+            a["ts"] -= dagen_terug * 86400
+            a["datum"] = _t.strftime("%Y-%m-%d", _t.localtime(a["ts"]))
+    refresh(c)
+
+
+def test_bon_only_prices_and_never_books():
     c = make_coordinator([{"id": 1, "product_id": 8, "amount": 1, "shopping_list_id": 1, "done": 0},
                           {"id": 2, "product_id": 10, "amount": 1, "shopping_list_id": 1, "done": 0}])
-    run(c.set_done(1, True))                       # bananen afgevinkt -> tx1 geboekt
-    refresh(c)
-    res = run(c.bon.verwerk("Lidl", "2026-10-04", "/media/bonnetjes/lidl/a.jpg", [
+    _winkelen(c, [1])                               # bananen afgerekend -> tx1; komkommer niet afgevinkt
+    n_purchase = len([x for x in c.api.calls if x[0] == "purchase"])
+    from datetime import date
+    res = run(c.bon.verwerk("Lidl", date.today().isoformat(), "/media/bonnetjes/lidl/a.jpg", [
         {"bon": "BANANEN", "product": "Bananen", "grocy": "Bananen", "aantal": 1, "totaal": 1.19},
         {"bon": "KOMKOMMER", "product": "Komkommer", "grocy": "Komkommer", "aantal": 1, "totaal": 0.79},  # niet afgevinkt
         {"bon": "CHOCO PASEO", "product": "Chocoladepasta", "grocy": "", "aantal": 1, "totaal": 2.49},  # onbekend
     ]))
-    purchases = [x for x in c.api.calls if x[0] == "purchase"]
-    assert purchases == [("purchase", 8, 1.0, 1), ("purchase", 10, 1.0, 1, 0.79)]   # bananen niet nogmaals geboekt
+    assert len([x for x in c.api.calls if x[0] == "purchase"]) == n_purchase    # bon boekt NIETS
     assert ("price", 8, "tx1", 1.19) in c.api.calls
-    assert c.api.items[2]["done"] == 1             # komkommer op de lijst -> afgevinkt zonder extra boeking
-    assert res["aantallen"] == {"prijs": 1, "ongepland": 1, "te koppelen": 1}
-    assert len(c.state["queue"]) == 1 and c.state["queue"][0]["tekst"] == "CHOCO PASEO"
+    assert c.api.items[2]["done"] == 0             # lijst blijft ongemoeid
+    assert res["aantallen"] == {"prijs": 1, "los": 1, "te koppelen": 1} and res["niet_afgevinkt"] == 1
+    bon = c.state["bonnen"][0]
+    komkommer = next(l for l in bon["regels"] if l["tekst"] == "KOMKOMMER")
+    assert komkommer["rest"] == 1.0 and komkommer["tx"] is None
     # zelfde bestand nogmaals: overslaan
     assert run(c.bon.verwerk("Lidl", None, "/media/bonnetjes/lidl/a.jpg", []))["overgeslagen"]
+    # vanuit de pop-up alsnog boeken: met bonprijs en bondatum; open lijst-item verdwijnt
+    assert run(c.bon.boek(bon["id"], [komkommer["id"]])) == 1
+    assert c.api.calls[[x[0] for x in c.api.calls].index("delete", len(c.api.calls) - 2)] == ("delete", 2)
+    assert ("purchase", 10, 1.0, 1, 0.79) in c.api.calls
+    assert komkommer["status"] == "geboekt" and bon["afgehandeld"]
+    assert run(c.bon.boek(bon["id"])) == 0         # niet dubbel
+
+
+def test_late_bon_matches_on_bondatum():
+    """Bon een week later verwerkt: koppelt toch aan de winkelboeking van die dag (de fout van 25 oktober)."""
+    import time as _t
+    c = make_coordinator([{"id": 1, "product_id": 8, "amount": 2, "shopping_list_id": 1, "done": 0}])
+    _winkelen(c, [1], dagen_terug=7)
+    bondag = c.state["afvink"][0]["datum"]
+    n_purchase = len([x for x in c.api.calls if x[0] == "purchase"])
+    res = run(c.bon.verwerk("Lidl", bondag, "laat", [{"bon": "BANANEN", "product": "Bananen", "grocy": "Bananen", "aantal": 2, "totaal": 2.38}]))
+    assert res["aantallen"] == {"prijs": 1} and ("price", 8, "tx1", 1.19) in c.api.calls
+    assert len([x for x in c.api.calls if x[0] == "purchase"]) == n_purchase
+    # bon van een andere dag koppelt niet aan die boeking
+    res = run(c.bon.verwerk("Lidl", "2020-01-01", "anders", [{"bon": "BANANEN", "product": "Bananen", "grocy": "Bananen", "aantal": 1, "totaal": 1.19}]))
+    assert res["aantallen"] == {"los": 1}
+
+
+def test_bon_partial_and_niet_boeken():
+    from datetime import date
+    c = make_coordinator([{"id": 1, "product_id": 8, "amount": 1, "shopping_list_id": 1, "done": 0}])
+    _winkelen(c, [1])
+    res = run(c.bon.verwerk("Lidl", date.today().isoformat(), "p", [
+        {"bon": "BANANEN", "product": "Bananen", "grocy": "Bananen", "aantal": 3, "totaal": 3.57},
+        {"bon": "KOMKOMMER", "product": "Komkommer", "grocy": "Komkommer", "aantal": 1, "totaal": 0.79}]))
+    assert res["aantallen"] == {"deels": 1, "los": 1} and res["niet_afgevinkt"] == 2
+    bon = c.state["bonnen"][0]
+    assert bon["regels"][0]["rest"] == 2.0
+    c.bon.niet_boeken(bon["id"])
+    assert [l["status"] for l in bon["regels"]] == ["prijs", "niet geboekt"] and bon["afgehandeld"]
 
 
 def test_queue_koppel_remembers_mapping_with_factor():
     c = make_coordinator([{"id": 1, "product_id": 70, "amount": 12, "shopping_list_id": 1, "done": 0}])
-    run(c.set_done(1, True))                       # 12 eieren afgevinkt -> tx1
-    refresh(c)
+    _winkelen(c, [1])                              # 12 eieren afgerekend -> tx1
     run(c.bon.verwerk("Lidl", None, "b1", [{"bon": "SCHARRELEIEREN 6ST", "product": "Scharreleieren", "aantal": 2, "totaal": 3.78}]))
     q = c.state["queue"][0]
     assert q["factor"] == 6
     run(c.bon.koppel(q["id"], 70, 6))
     assert ("price", 70, "tx1", 0.315) in c.api.calls      # 3,78 / 12 stuks
-    assert not [x for x in c.api.calls if x[0] == "purchase" and x[1] == 70 and len(x) > 4]
+    assert len([x for x in c.api.calls if x[0] == "purchase"]) == 1
     assert c.state["queue"] == []
     assert c.state["mappings"][mapping_key("Lidl", "SCHARRELEIEREN 6ST")]["factor"] == 6
-    # volgende bon met dezelfde tekst: automatisch, met factor 6, ongepland (niet afgevinkt)
+    # volgende bon met dezelfde tekst: automatisch gekoppeld, factor 6, niet afgevinkt -> niet geboekt
     run(c.bon.verwerk("Lidl", None, "b2", [{"bon": "SCHARRELEIEREN 6ST", "product": "Scharreleieren", "aantal": 1, "totaal": 1.89}]))
-    assert c.api.calls[-1][:3] == ("purchase", 70, 6.0) and c.state["queue"] == []
+    assert len([x for x in c.api.calls if x[0] == "purchase"]) == 1 and c.state["queue"] == []
     regel = c.state["bonnen"][0]["regels"][0]
-    assert regel["bron"] == "koppeling" and regel["status"] == "ongepland"
+    assert regel["bron"] == "koppeling" and regel["status"] == "los" and regel["rest"] == 6.0
 
 
 def test_queue_negeer_and_nieuw_product_and_herkoppel():
@@ -279,10 +373,13 @@ def test_queue_negeer_and_nieuw_product_and_herkoppel():
     assert c.state["queue"] == []
     bon = c.state["bonnen"][0]
     wafel = next(l for l in bon["regels"] if l["tekst"] == "JUMBO WAFELS")
-    assert wafel["status"] == "ongepland" and wafel["product_id"] == 999 and wafel["tx"]
-    run(c.bon.herkoppel(bon["id"], wafel["id"], 70, 1))
+    assert wafel["status"] == "los" and wafel["product_id"] == 999 and not wafel["tx"]
+    assert not [x for x in c.api.calls if x[0] == "purchase"]
+    run(c.bon.boek(bon["id"], [wafel["id"]]))       # zelf geboekt
+    assert wafel["tx"] == "tx1"
+    run(c.bon.herkoppel(bon["id"], wafel["id"], 70, 1))   # verkeerd product: boeking verhuist mee
     assert ("undo", "tx1") in c.api.calls
-    assert wafel["product_id"] == 70
+    assert wafel["product_id"] == 70 and wafel["status"] == "geboekt" and wafel["tx"] == "tx2"
     # genegeerde tekst wordt de volgende keer stil overgeslagen
     run(c.bon.verwerk("Jumbo", None, "b4", [{"bon": "XYZ SAUS", "product": "Xyz saus", "aantal": 1, "totaal": 2.0}]))
     assert c.state["queue"] == [] and c.state["bonnen"][0]["regels"][0]["status"] == "genegeerd"

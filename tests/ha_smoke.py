@@ -248,6 +248,10 @@ async def main():
     qid = data["queue"][0]["id"]
     await c.bon.nieuw_product(qid, "Chocopasta", 4, 1)
     print("WS na nieuw product", [l["status"] for l in ws.payload(c)["bonnen"][0]["regels"]])
+    voor = len([x for x in STATE["log"] if x[0] == "purchase"])
+    print("AFRONDEN", await c.afronden(1), "boekingen", len([x for x in STATE["log"] if x[0] == "purchase"]) - voor)
+    await c.async_refresh()
+    print("BON BOEK", await c.bon.boek(c.state["bonnen"][0]["id"]), [l["status"] for l in c.state["bonnen"][0]["regels"]])
     # verkeerd uitgelezen bedrag corrigeren: boeking opnieuw met de juiste prijs
     bon = c.state["bonnen"][0]
     kk = next(l for l in bon["regels"] if l["tekst"] == "KOMKOMMER")

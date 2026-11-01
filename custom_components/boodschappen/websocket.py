@@ -37,9 +37,11 @@ def payload(c) -> dict[str, Any]:
     for b in c.state["bonnen"][:15]:
         bonnen.append({k: b.get(k) for k in ("id", "winkel", "datum", "bestand", "verwerkt", "totaal")} | {
             "regels": [
-                {k: l.get(k) for k in ("id", "tekst", "aantal", "totaal", "status", "product_id", "grocy_naam", "factor", "bron", "voorraad", "korting")}
+                {k: l.get(k) for k in ("id", "tekst", "aantal", "totaal", "status", "product_id", "grocy_naam", "factor", "bron",
+                                       "voorraad", "korting", "rest")}
                 for l in b["regels"]
-            ]
+            ],
+            "afgehandeld": bool(b.get("afgehandeld")),
         })
     return {
         "lists": [{"id": lid, "name": l["name"]} for lid, l in sorted(d.lists.items())],
@@ -88,10 +90,34 @@ async def _data(c, msg):
 
 
 async def _item_add(c, msg):
+    done = bool(msg.get("done", False))
     if msg.get("product_id"):
-        await c.add_product(msg["list_id"], int(msg["product_id"]), float(msg.get("amount") or 1))
+        await c.add_product(msg["list_id"], int(msg["product_id"]), float(msg.get("amount") or 1), done=done)
     else:
-        await c.add_text(msg["list_id"], msg["text"])
+        await c.add_text(msg["list_id"], msg["text"], done=done)
+
+
+def _melding_weg(c, notification_id: str) -> None:
+    hass = getattr(c, "hass", None)
+    if hass:
+        hass.async_create_task(hass.services.async_call("persistent_notification", "dismiss", {"notification_id": notification_id}))
+
+
+async def _afronden(c, msg):
+    res = await c.afronden(int(msg["list_id"]))
+    _melding_weg(c, f"boodschappen_mandje_{msg['list_id']}")
+    return res
+
+
+async def _bon_boek(c, msg):
+    res = await c.bon.boek(msg["bon_id"], msg.get("line_ids"))
+    _melding_weg(c, f"boodschappen_bon_{msg['bon_id']}")
+    return res
+
+
+async def _bon_niet_boeken(c, msg):
+    c.bon.niet_boeken(msg["bon_id"], msg.get("line_ids"))
+    _melding_weg(c, f"boodschappen_bon_{msg['bon_id']}")
 
 
 async def _item_done(c, msg):
@@ -177,7 +203,13 @@ async def _p_op(c, msg):
 COMMANDS = [
     ({vol.Required("type"): "boodschappen/data"}, _data),
     ({vol.Required("type"): "boodschappen/item_add", vol.Required("list_id"): int,
-      vol.Optional("text"): str, vol.Optional("product_id"): int, vol.Optional("amount"): vol.Coerce(float)}, _item_add),
+      vol.Optional("text"): str, vol.Optional("product_id"): int, vol.Optional("amount"): vol.Coerce(float),
+      vol.Optional("done"): bool}, _item_add),
+    ({vol.Required("type"): "boodschappen/afronden", vol.Required("list_id"): int}, _afronden),
+    ({vol.Required("type"): "boodschappen/bon_boek", vol.Required("bon_id"): str,
+      vol.Optional("line_ids"): vol.Any(None, [str])}, _bon_boek),
+    ({vol.Required("type"): "boodschappen/bon_niet_boeken", vol.Required("bon_id"): str,
+      vol.Optional("line_ids"): vol.Any(None, [str])}, _bon_niet_boeken),
     ({vol.Required("type"): "boodschappen/item_done", vol.Required("item_id"): int, vol.Required("done"): bool}, _item_done),
     ({vol.Required("type"): "boodschappen/item_amount", vol.Required("item_id"): int, vol.Required("amount"): vol.Coerce(float)}, _item_amount),
     ({vol.Required("type"): "boodschappen/item_delete", vol.Required("item_id"): int}, _item_delete),
