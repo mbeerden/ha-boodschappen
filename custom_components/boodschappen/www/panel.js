@@ -583,12 +583,15 @@ class BoodschappenPanel extends HTMLElement {
   }
 
   _item(i) {
-    const note = i.note ? `<small>${esc(i.note)}</small>` : "";
-    const extra = i.done
+    // winkelmodus: notitie klein onder de (i), zodat elk blok één regel hoog blijft
+    const compact = this.winkel && !i.done && i.note;
+    const note = i.note && !compact ? `<small>${esc(i.note)}</small>` : "";
+    let extra = i.done
       ? ""
       : i.product_id
       ? `<button class="info" data-act="info" data-pid="${i.product_id}" aria-label="Details van ${esc(i.name)}" title="Productdetails">ⓘ</button>`
       : `<button class="info nieuw" data-act="maakprod" data-id="${i.id}" data-naam="${esc(i.name)}" aria-label="Maak product van ${esc(i.name)}" title="Product aanmaken (vak en winkel)">+</button>`;
+    if (compact) extra = `<span class="infokol">${extra}<small class="knote" title="${esc(i.note)}">${esc(i.note)}</small></span>`;
     return `<li class="item ${i.done ? "done" : ""}">
       <button class="vink" data-act="vink" data-id="${i.id}" data-done="${i.done ? 0 : 1}" aria-pressed="${i.done}"
         aria-label="${esc(i.name)} ${i.done ? "terugzetten" : "afvinken"}">
@@ -1116,6 +1119,10 @@ header .vul { flex: 1; }
 :host(.winkel) .stop h2 { padding: 4px 0 2px; }
 :host(.winkel) .stepper button { height: 38px; }
 :host(.winkel) button.info { height: 38px; }
+.infokol { flex: none; position: relative; align-self: stretch; width: 36px; margin-right: 4px; }
+.infokol button.info { position: absolute; top: 2px; left: 0; height: 30px; margin: 0; }
+.knote { position: absolute; right: 0; bottom: 3px; max-width: 96px; font-size: 10px; line-height: 1.2; color: var(--secondary-text-color);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; pointer-events: none; }
 
 /* Onderbalk: mandje en afronden */
 .onder { flex: none; position: relative; background: var(--card-background-color); border-top: 1px solid var(--rand);
