@@ -7,6 +7,7 @@ Verschuift of verwijdert iemand zo'n event in de agenda, dan neemt de planning d
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import date, datetime, timedelta
 import json
 import logging
@@ -22,6 +23,22 @@ from homeassistant.util import dt as dt_util
 
 from .aanbiedingen import html_naar_tekst, parse_json
 from .api import GrocyError
+from .menu import (
+    FEEDBACK,
+    ROLLEN,
+    VASTE_TITEL,
+    controleer_antwoord,
+    context_tekst,
+    dag_info,
+    default_menu,
+    feedback_key,
+    is_afgewezen,
+    labels_voor,
+    porties_voor,
+    schoon_menu,
+    voorraad_overzicht,
+    voorstel_prompt,
+)
 
 if TYPE_CHECKING:
     from .coordinator import BoodschappenCoordinator
@@ -42,6 +59,7 @@ DEFAULT_INSTELLINGEN: dict[str, Any] = {
     "personen": [],          # namen voor beoordelingen
     "huisregels": "",        # vrije tekst voor het AI-voorstel (wie kookt wanneer, dieetwensen, ...)
     "ai": None,              # ai_task.* entiteit (leeg = eerste)
+    **default_menu(),        # profielen, weekdagen, stijl, afwisseling (zie menu.py)
 }
 
 
@@ -385,8 +403,12 @@ class Eten:
             "voorstel": data.get("voorstel"),
             "suggesties": data.get("suggesties", {}),
             "beoordelingen": data.get("beoordelingen", []),
-            "instellingen": {**DEFAULT_INSTELLINGEN, **(data.get("instellingen") or {})},
+            "feedback": data.get("feedback", {}),
+            "instellingen": {**copy.deepcopy(DEFAULT_INSTELLINGEN), **(data.get("instellingen") or {})},
         }
+        self.s["instellingen"].update(schoon_menu(self.s["instellingen"]))
+        if self.s["voorstel"] and self.s["voorstel"].get("versie") != 2:
+            self.s["voorstel"] = None  # voorstel in het oude formaat (één gerecht per dag): opnieuw maken
 
     def save(self) -> None:
         cutoff = (date.today() - timedelta(days=120)).isoformat()
@@ -415,6 +437,8 @@ class Eten:
             "voorstel": self.s["voorstel"],
             "suggesties": self.s["suggesties"],
             "beoordelingen": self.s["beoordelingen"][-400:],
+            "feedback": self.s["feedback"],
+            "feedback_soorten": FEEDBACK,
             "instellingen": self.inst,
             "extern": self.extern,
             "sync_fout": self.sync_fout,
@@ -480,103 +504,223 @@ class Eten:
         return [{"id": pid, "name": p["name"]} for pid, p in d.products.items() if str(p.get("active", 1)) != "0"]
 
     # --- weekmenu ---------------------------------------------------------
-    async def voorstel_maken(self, start: str, dagen: int, wens: str) -> None:
-        begin = date.fromisoformat(start)
-        await self.sync(forceer=True)
-        gepland = {p["datum"]: p for p in self.s["planning"]}
-        extern = {}
-        for e in self.extern:
-            extern.setdefault(e["datum"], e["titel"])
-        te_plannen = []
-        for n in range(dagen):
-            d = begin + timedelta(days=n)
-            iso = d.isoformat()
-            dag = {"datum": iso, "dag": DAGEN[d.weekday()]}
-            if iso in gepland:
-                dag["vast"] = gepland[iso]["titel"]
-            elif iso in extern:
-                dag["agenda"] = extern[iso]
-            te_plannen.append(dag)
+    # --- weekmenu: context ----------------------------------------------------
+    @property
+    def menu(self) -> dict:
+        return schoon_menu(self.inst)
+
+    async def _voorraad(self) -> tuple[dict[int, float], set[int]]:
+        try:
+            stock = await self.c.api.get("/stock") or []
+        except GrocyError as err:
+            _LOGGER.warning("Voorraad ophalen mislukt: %s", err)
+            stock = []
+        return voorraad_overzicht(stock, date.today())
+
+    def _acties(self) -> dict[int, dict]:
+        """Aanbiedingen met voordeel: {product_id: aanbieding}."""
+        aanb = getattr(self.c, "aanbiedingen", None)
+        if aanb is None:
+            return {}
+        try:
+            lijst = aanb.zichtbaar()
+        except Exception:  # noqa: BLE001 - aanbiedingen zijn een extraatje
+            return {}
+        return {int(a["product_id"]): a for a in lijst if a.get("product_id") and a.get("voordeel") is not False}
+
+    def _recepten_compact(self) -> list[dict]:
         gem = gemiddelden(self.s["beoordelingen"])
         laatst: dict[str, str] = {}
         for p in self.s["planning"]:
             if p.get("recept_id"):
                 laatst[p["recept_id"]] = max(laatst.get(p["recept_id"], ""), p["datum"])
-        recepten = [recept_compact(r, gem.get(r["id"]), laatst.get(r["id"])) for r in self.s["recepten"].values()]
+        uit = []
+        for r in self.s["recepten"].values():
+            if is_afgewezen(self.s["feedback"], r["id"], r["naam"]):
+                continue  # 'niet lekker': nooit meer voorstellen
+            c = recept_compact(r, gem.get(r["id"]), laatst.get(r["id"]))
+            fb = sorted((self.s["feedback"].get(r["id"]) or {}).get("soorten") or {})
+            if fb:
+                c["feedback"] = fb
+            uit.append(c)
+        return uit
+
+    def dagen_info(self, van: str, tot: str) -> list[dict]:
+        """Standaard per dag in de gekozen periode: wie eet mee, soort dag, wie kookt, tijd, wat er al staat."""
+        begin, eind = date.fromisoformat(van), date.fromisoformat(tot)
+        if eind < begin:
+            begin, eind = eind, begin
+        if (eind - begin).days > 20:
+            raise ValueError("Kies een periode van hooguit 3 weken")
+        menu = self.menu
+        gepland = {p["datum"]: p for p in self.s["planning"]}
+        extern: dict[str, str] = {}
+        for e in self.extern:
+            extern.setdefault(e["datum"], e["titel"])
+        uit = []
+        d = begin
+        while d <= eind:
+            info = dag_info(menu, d)
+            p = gepland.get(info["datum"])
+            info["gepland"] = p.get("titel") if p else None
+            info["agenda"] = extern.get(info["datum"])
+            info["aan"] = not p and info["datum"] >= date.today().isoformat()
+            uit.append(info)
+            d += timedelta(days=1)
+        return uit
+
+    # --- weekmenu: voorstel met 3 opties per dag ---------------------------
+    def _optie(self, x: dict, labels_ctx: tuple, dag: dict) -> dict | None:
+        """AI-optie omzetten: bestaand recept, nieuw recept (concept) of alleen een titel."""
+        voorraad, bijna, acties, namen = labels_ctx
+        rid = x.get("recept_id") if x.get("recept_id") in self.s["recepten"] else None
+        concept = None
+        if not rid and isinstance(x.get("nieuw_recept"), dict) and x["nieuw_recept"].get("naam"):
+            concept = schoon_recept({**x["nieuw_recept"], "id": None})
+            concept["tags"] = list(dict.fromkeys([*concept["tags"], "nieuw"]))[:8]
+        recept = self.s["recepten"].get(rid) if rid else concept
+        titel = recept["naam"] if recept else str(x.get("titel") or "").strip()
+        if not titel or is_afgewezen(self.s["feedback"], rid, titel):
+            return None
+        rol = x.get("rol") if x.get("rol") in ROLLEN else ("nieuw" if concept else "favoriet")
+        return {
+            "id": nieuw_id(), "rol": rol, "recept_id": rid or (concept["id"] if concept else None),
+            "titel": titel, "reden": str(x.get("reden") or "").strip(), "concept": concept,
+            "tijd": (recept or {}).get("tijd"), "vega": bool((recept or {}).get("vega")),
+            "labels": labels_voor(recept, voorraad, bijna, acties, namen),
+        }
+
+    async def _vraag_opties(self, te_plannen: list[dict], overige: list[dict], wens: str) -> dict[str, list[dict]]:
+        menu = self.menu
+        voorraad, bijna = await self._voorraad()
+        acties = self._acties()
+        namen = {p["id"]: p["name"] for p in self._producten()}
+        context = context_tekst(menu, self.inst.get("huisregels", ""), self.s["feedback"], date.today())
+        recepten = self._recepten_compact()
         correctie = ""
+        res: Any = None
         for _poging in range(2):
-            res = await self._vraag_ai(
-                "Eten: weekmenu voorstellen",
-                weekmenu_prompt(te_plannen, recepten, self.inst.get("huisregels", ""), wens, date.today(), correctie),
-            )
-            if not isinstance(res, list):
-                raise ValueError("De AI gaf geen bruikbaar weekmenu terug")
-            correctie = weekdag_fouten(res, te_plannen)
+            res = await self._vraag_ai("Eten: weekmenu met opties", voorstel_prompt(
+                te_plannen, overige, menu["profielen"], context, wens, recepten, namen, voorraad, bijna, acties,
+                date.today(), correctie))
+            correctie = controleer_antwoord(res, te_plannen)
             if not correctie:
                 break
-            _LOGGER.info("Weekmenu: weekdagen klopten niet (%s), opnieuw", correctie)
-        vast = {d["datum"]: d.get("vast") for d in te_plannen}
+            _LOGGER.info("Weekmenu: antwoord klopte niet (%s), opnieuw", correctie)
+        if not isinstance(res, list):
+            raise ValueError("De AI gaf geen bruikbaar weekmenu terug")
+        ctx = (voorraad, bijna, acties, namen)
+        per_dag: dict[str, list[dict]] = {}
+        dagen = {d["datum"]: d for d in te_plannen}
+        for x in res:
+            if not isinstance(x, dict):
+                continue
+            iso = str(x.get("datum") or "")[:10]
+            if iso not in dagen:
+                continue
+            opties = []
+            gezien = set()
+            for o in x.get("opties") or []:
+                if not isinstance(o, dict):
+                    continue
+                opt = self._optie(o, ctx, dagen[iso])
+                if opt and opt["titel"].lower() not in gezien:
+                    gezien.add(opt["titel"].lower())
+                    opties.append(opt)
+            per_dag[iso] = opties[:3]
+        return per_dag
+
+    async def voorstel_maken(self, dagen: list[dict], wens: str) -> None:
+        """Voorstel voor de gekozen dagen. dagen: [{datum, aan, aanwezig, soort, kookt, minuten, vriezer, wens}]."""
+        if not dagen:
+            raise ValueError("Kies minstens één dag")
+        await self.sync(forceer=True)
+        menu = self.menu
+        gepland = {p["datum"]: p for p in self.s["planning"]}
+        extern: dict[str, str] = {}
         vervangt: dict[str, list[str]] = {}
         for e in self.extern:
+            extern.setdefault(e["datum"], e["titel"])
             if e.get("uid"):
                 vervangt.setdefault(e["datum"], []).append(e["uid"])
-        dagen_uit = []
-        for x in res:
-            iso = str(x.get("datum") or "")[:10]
-            if iso not in vast:
+        uit, te_plannen, overige = [], [], []
+        for x in sorted(dagen, key=lambda y: y["datum"]):
+            iso = str(x["datum"])[:10]
+            basis = dag_info(menu, date.fromisoformat(iso))
+            d = {**basis, **{k: x[k] for k in ("soort", "kookt", "minuten", "vriezer", "aanwezig", "wens", "notitie") if k in x}}
+            d["agenda"] = extern.get(iso)
+            d["aanwezig"] = [n for n in d.get("aanwezig") or [] if n]
+            if not x.get("aan", True):
+                if iso in gepland:
+                    overige.append({**d, "vast_titel": gepland[iso].get("titel")})
                 continue
-            rid = x.get("recept_id") if x.get("recept_id") in self.s["recepten"] else None
-            idee = extern.get(iso) or ""
-            if UIT_VRIEZER.search(idee) or UIT_VRIEZER.search(str(x.get("titel") or "")):
-                # eten uit de vriezer: titel uit de agenda houden, niets te koken of te kopen
-                x = {**x, "titel": idee or x.get("titel"), "kookt": "", "porties": None, "vriezer": 0, "boodschappen": False}
-                rid = None
-            geen = bool(x.get("geen")) and not vast[iso]
-            if geen:
-                x = {**x, "titel": GEEN_TITEL, "kookt": "", "porties": None, "vriezer": 0, "boodschappen": False}
-                rid = None
-            titel = self.s["recepten"][rid]["naam"] if rid else str(x.get("titel") or "").strip()
-            dagen_uit.append({
-                "geen": geen,
-                "datum": iso, "recept_id": rid, "titel": titel or "?",
-                "kookt": "" if str(x.get("kookt") or "").strip().lower() in ("niemand", "-", "geen", "n.v.t.") else (x.get("kookt") or ""),
-                "porties": x.get("porties") or None, "vriezer": x.get("vriezer") or 0,
-                "boodschappen": bool(x.get("boodschappen", True)) and not vast[iso],
-                "reden": x.get("reden") or "", "vast": bool(vast[iso]),
-                "agenda": extern.get(iso), "vervangt": [] if vast[iso] else vervangt.get(iso, []),
-            })
-        dagen_uit.sort(key=lambda x: x["datum"])
-        self.s["voorstel"] = {"start": start, "wens": wens, "dagen": dagen_uit, "gemaakt": datetime.now().isoformat(timespec="minutes")}
+            d.update({"opties": [], "keuze": None, "overslaan": False, "vervangt": vervangt.get(iso, []),
+                      "porties": porties_voor(menu["profielen"], d["aanwezig"]) + int(d.get("vriezer") or 0)})
+            if d["soort"] == "koken":
+                te_plannen.append(d)
+            uit.append(d)
+        if te_plannen:
+            opties = await self._vraag_opties(te_plannen, overige, wens)
+            for d in te_plannen:
+                d["opties"] = opties.get(d["datum"], [])
+                d["keuze"] = 0 if d["opties"] else None
+        self.s["voorstel"] = {
+            "versie": 2, "van": uit[0]["datum"] if uit else dagen[0]["datum"], "tot": uit[-1]["datum"] if uit else dagen[-1]["datum"],
+            "wens": wens, "dagen": uit, "gemaakt": datetime.now().isoformat(timespec="minutes"),
+        }
         self.save()
 
+    async def voorstel_dag_opnieuw(self, datum: str, wens: str) -> None:
+        """Drie nieuwe opties voor één dag in het voorstel (met een wens)."""
+        v = self.s.get("voorstel")
+        d = next((x for x in (v or {}).get("dagen", []) if x["datum"] == datum), None)
+        if d is None:
+            raise ValueError("Deze dag staat niet in het voorstel")
+        d["wens"] = wens
+        d["soort"] = "koken"
+        overige = [{**x, "vast_titel": self._gekozen(x)["titel"]} for x in v["dagen"]
+                   if x["datum"] != datum and self._gekozen(x)]
+        opties = await self._vraag_opties([d], overige, v.get("wens", ""))
+        d["opties"] = opties.get(datum, [])
+        d["keuze"] = 0 if d["opties"] else None
+        d["geen"] = False
+        self.save()
+
+    def _gekozen(self, d: dict) -> dict | None:
+        if d.get("overslaan"):
+            return None
+        if d.get("geen") or d.get("soort") in VASTE_TITEL:
+            soort = "niet" if d.get("geen") else d["soort"]
+            return {"recept_id": None, "titel": d.get("notitie") if soort == "anders" and d.get("notitie") else VASTE_TITEL[soort],
+                    "concept": None, "geen": soort == "niet", "boodschappen": False}
+        if d.get("keuze") is None or d["keuze"] >= len(d.get("opties") or []):
+            return None
+        o = d["opties"][d["keuze"]]
+        return {**o, "geen": False, "boodschappen": True}
+
     def voorstel_wijzig(self, datum: str, velden: dict) -> None:
+        """Keuze per dag: keuze (index), geen maaltijd, overslaan, wie eet mee, porties, wie kookt."""
         v = self.s.get("voorstel")
         if not v:
             raise ValueError("Er is geen voorstel")
+        menu = self.menu
         for d in v["dagen"]:
-            if d["datum"] == datum:
-                if isinstance(velden.get("concept"), dict):
-                    # (bewerkt) nieuw recept bij deze dag; komt pas bij goedkeuren in de bibliotheek
-                    d["concept"] = schoon_recept(velden["concept"], {"id": velden["concept"].get("id") or nieuw_id()})
-                if "recept_id" in velden:
-                    rid = velden["recept_id"] or None
-                    concept = d.get("concept")
-                    if concept and rid == concept["id"]:
-                        d["recept_id"] = rid
-                        d["titel"] = concept["naam"]
-                    else:
-                        d["recept_id"] = rid if rid in self.s["recepten"] else None
-                        if d["recept_id"]:
-                            d["titel"] = self.s["recepten"][rid]["naam"]
-                if "geen" in velden and bool(velden["geen"]) != bool(d.get("geen")):
-                    if velden["geen"]:
-                        d["vorige"] = {k: d.get(k) for k in ("recept_id", "titel", "boodschappen")}
-                        d.update({"geen": True, "recept_id": None, "titel": GEEN_TITEL, "boodschappen": False})
-                    else:
-                        d.update({"geen": False, **(d.pop("vorige", None) or {"titel": "?", "boodschappen": True})})
-                for k in ("titel", "kookt", "porties", "vriezer", "boodschappen", "overslaan", "reden", "wens"):
-                    if k in velden and not (k == "titel" and d.get("recept_id") and "recept_id" not in velden):
-                        d[k] = velden[k]
+            if d["datum"] != datum:
+                continue
+            if "keuze" in velden:
+                k = velden["keuze"]
+                d["keuze"] = int(k) if k is not None and 0 <= int(k) < len(d.get("opties") or []) else None
+                d["geen"] = False
+            for k in ("geen", "overslaan"):
+                if k in velden:
+                    d[k] = bool(velden[k])
+            if "kookt" in velden:
+                d["kookt"] = str(velden["kookt"] or "")
+            if "aanwezig" in velden:
+                d["aanwezig"] = [str(n) for n in velden["aanwezig"] or []]
+                d["porties"] = porties_voor(menu["profielen"], d["aanwezig"]) + int(d.get("vriezer") or 0)
+            if velden.get("porties"):
+                d["porties"] = max(1, int(velden["porties"]))
         self.save()
 
     async def dag_aanpassen(self, datum: str, wens: str, plan_id: str | None = None) -> None:
@@ -585,7 +729,7 @@ class Eten:
         d = date.fromisoformat(datum)
         ws = week_start(d)
         v = self.s.get("voorstel")
-        in_voorstel = bool(v) and not plan_id and any(x["datum"] == datum for x in v["dagen"])
+        in_voorstel = False  # in het voorstel vraag je per dag nieuwe opties (voorstel_dag_opnieuw)
         # rest van de week: voorstel, planning en losse agenda-events
         week: dict[str, dict] = {}
         for p in self.s["planning"]:
@@ -596,20 +740,22 @@ class Eten:
                 week[e["datum"]] = {"datum": e["datum"], "dag": DAGEN[date.fromisoformat(e["datum"]).weekday()], "agenda": e["titel"]}
         if v:
             for x in v["dagen"]:
-                if ws.isoformat() <= x["datum"] < (ws + timedelta(days=7)).isoformat():
-                    week[x["datum"]] = {"datum": x["datum"], "dag": DAGEN[date.fromisoformat(x["datum"]).weekday()], "vast": x["titel"]}
+                g = self._gekozen(x)
+                if g and ws.isoformat() <= x["datum"] < (ws + timedelta(days=7)).isoformat():
+                    week[x["datum"]] = {"datum": x["datum"], "dag": DAGEN[date.fromisoformat(x["datum"]).weekday()], "vast": g["titel"]}
         week.pop(datum, None)
         gem = gemiddelden(self.s["beoordelingen"])
         laatst: dict[str, str] = {}
         for p in self.s["planning"]:
             if p.get("recept_id"):
                 laatst[p["recept_id"]] = max(laatst.get(p["recept_id"], ""), p["datum"])
-        recepten = [recept_compact(r, gem.get(r["id"]), laatst.get(r["id"])) for r in self.s["recepten"].values()]
+        recepten = self._recepten_compact()
         res = await self._vraag_ai("Eten: dag aanpassen", dag_prompt(
             {"datum": datum, "dag": DAGEN[d.weekday()],
              "agenda": next((e["titel"] for e in self.extern if e["datum"] == datum), None)},
             wens, sorted(week.values(), key=lambda x: x["datum"]),
-            recepten, self.inst.get("huisregels", ""), self._producten(), date.today()))
+            recepten, context_tekst(self.menu, self.inst.get("huisregels", ""), self.s["feedback"], date.today()),
+            self._producten(), date.today()))
         if not isinstance(res, dict):
             raise ValueError("De AI gaf geen bruikbaar voorstel terug")
         concept = None
@@ -651,8 +797,7 @@ class Eten:
                                sug.get("plan_id"), sync=False)
         item["op_lijst"] = False
         self.save()
-        toegevoegd = await self.ingredienten_op_lijst([item["id"]]) if item.get("boodschappen", True) else 0
-        return {"op_lijst": toegevoegd}
+        return {"plan_ids": [item["id"]] if item.get("boodschappen", True) and item.get("recept_id") else []}
 
     def suggestie_weg(self, datum: str) -> None:
         self.s["suggesties"].pop(datum, None)
@@ -663,22 +808,115 @@ class Eten:
         self.save()
 
     async def voorstel_goedkeuren(self) -> dict:
+        """Gekozen opties plannen (agenda). De boodschappen gaan pas na het overzicht van benodigde producten op de lijst."""
         v = self.s.get("voorstel")
         if not v:
             raise ValueError("Er is geen voorstel")
         nieuw: list[dict] = []
         for d in v["dagen"]:
-            if d.get("overslaan") or d.get("vast"):
+            g = self._gekozen(d)
+            if not g:
                 continue
-            c = d.get("concept")
-            if c and d.get("recept_id") == c["id"]:
+            c = g.get("concept")
+            if c:
                 self.s["recepten"][c["id"]] = c  # nieuw recept pas nu in de bibliotheek
-            nieuw.append(await self.plan(d["datum"], {k: d.get(k) for k in ("recept_id", "titel", "kookt", "porties", "vriezer", "boodschappen", "geen")}, sync=False))
+            velden = {"recept_id": g.get("recept_id"), "titel": g["titel"], "kookt": d.get("kookt") or "",
+                      "porties": d.get("porties") if g.get("boodschappen") else None,
+                      "vriezer": d.get("vriezer") or 0 if g.get("boodschappen") else 0,
+                      "boodschappen": bool(g.get("boodschappen")), "geen": bool(g.get("geen"))}
+            item = await self.plan(d["datum"], velden, sync=False)
+            item["aanwezig"] = d.get("aanwezig") or []
+            nieuw.append(item)
             await self._extern_weg(d.get("vervangt") or [])
         self.s["voorstel"] = None
         self.save()
-        toegevoegd = await self.ingredienten_op_lijst([p["id"] for p in nieuw])
-        return {"gepland": len(nieuw), "op_lijst": toegevoegd}
+        return {"gepland": len(nieuw), "plan_ids": [p["id"] for p in nieuw if p.get("boodschappen", True) and p.get("recept_id")]}
+
+    # --- benodigde producten: eerst tonen, dan pas op de lijst --------------
+    async def benodigd_overzicht(self, plan_ids: list[str]) -> dict:
+        items = [p for p in self.s["planning"] if p["id"] in plan_ids and p["datum"] >= date.today().isoformat()]
+        nodig = benodigd(items, self.s["recepten"])
+        voorraad, _bijna = await self._voorraad()
+        await self.c.async_refresh()
+        d = self.c.data
+        acties = self._acties()
+        rijen = []
+        for pid, n in nodig.items():
+            if pid not in d.products:
+                continue
+            lid = d.list_for_product(pid)
+            al = sum(i.amount for i in d.items if i.product_id == pid and not i.done)
+            in_huis = voorraad.get(pid, 0.0)
+            tekort = n["aantal"] - in_huis - al
+            rijen.append({
+                "product_id": pid, "naam": d.products[pid]["name"], "list_id": lid,
+                "winkel": d.lists.get(lid, {}).get("name", "?"), "nodig": n["aantal"], "in_huis": in_huis,
+                "op_lijst": al, "toevoegen": float(max(0, math.ceil(tekort - 1e-9))), "voor": n["voor"],
+                "actie": (acties.get(pid) or {}).get("actie"),
+            })
+        rijen.sort(key=lambda r: (r["winkel"], r["naam"].lower()))
+        los = []
+        for it in items:
+            r = self.s["recepten"].get(it.get("recept_id") or "")
+            if not r or not it.get("boodschappen", True):
+                continue
+            for ing in r.get("ingredienten") or []:
+                if not ing.get("product_id") and not ing.get("basis"):
+                    los.append({"tekst": ing["tekst"], "voor": r["naam"]})
+        return {"plan_ids": [p["id"] for p in items], "rijen": rijen, "los": los,
+                "lijsten": [{"id": lid, "name": l["name"]} for lid, l in sorted(d.lists.items())]}
+
+    async def lijst_toevoegen(self, plan_ids: list[str], regels: list[dict], los: list[dict]) -> int:
+        """Gekozen producten (met aantallen) op de lijst van hun winkel zetten."""
+        await self.c.async_refresh()
+        d = self.c.data
+        titels = {p["id"]: p.get("titel") for p in self.s["planning"]}
+        notitie = ("recept: " + ", ".join(t for pid, t in titels.items() if pid in plan_ids and t))[:120]
+        n = 0
+        for r in regels:
+            pid, aantal = int(r["product_id"]), float(r.get("aantal") or 0)
+            if aantal <= 0 or pid not in d.products:
+                continue
+            await self.c.add_product(int(r.get("list_id") or d.list_for_product(pid)), pid, aantal, notitie)
+            n += 1
+        for x in los:
+            if str(x.get("tekst") or "").strip():
+                lid = int(x.get("list_id") or min(d.lists))
+                await self.c.api.add_list_item(lid, None, 1, str(x["tekst"]).strip()[:120])
+                n += 1
+        for p in self.s["planning"]:
+            if p["id"] in plan_ids:
+                p["op_lijst"] = True
+        self.save()
+        await self.c.async_refresh()
+        return n
+
+    # --- feedback (👍 wel lekker, ⚡ lekker snel, 👎 niet lekker, 🕒 teveel werk) ----
+    def feedback(self, recept_id: str | None, titel: str | None, soort: str, aan: bool) -> None:
+        if soort not in FEEDBACK:
+            raise ValueError("Onbekende feedback")
+        if recept_id and recept_id in self.s["recepten"]:
+            titel = self.s["recepten"][recept_id]["naam"]
+        elif recept_id:
+            recept_id = None  # concept dat (nog) niet in de bibliotheek staat: op titel onthouden
+        if not titel:
+            raise ValueError("Geen gerecht om te beoordelen")
+        key = feedback_key(recept_id, titel)
+        f = self.s["feedback"].setdefault(key, {"recept_id": recept_id, "titel": titel, "soorten": {}})
+        f["titel"] = titel
+        if aan:
+            f["soorten"][soort] = date.today().isoformat()
+            # tegenstrijdige knoppen uitzetten
+            for a, b in (("wel_lekker", "niet_lekker"), ("lekker_snel", "teveel_werk")):
+                if soort == a:
+                    f["soorten"].pop(b, None)
+                elif soort == b:
+                    f["soorten"].pop(a, None)
+        else:
+            f["soorten"].pop(soort, None)
+        if not f["soorten"]:
+            self.s["feedback"].pop(key, None)
+        self.save()
 
     async def plan(self, datum: str, velden: dict, plan_id: str | None = None, sync: bool = True) -> dict:
         """Eén dag plannen of wijzigen (en de agenda bijwerken)."""
@@ -809,6 +1047,11 @@ class Eten:
                 self.inst[k] = inst[k]
         if isinstance(self.inst.get("personen"), str):
             self.inst["personen"] = [p.strip() for p in self.inst["personen"].split(",") if p.strip()]
+        if "personen" in inst and "profielen" not in inst:
+            # alleen namen opgegeven: bestaande profielen houden, nieuwe namen erbij
+            bestaand = {p["naam"]: p for p in self.inst.get("profielen") or []}
+            self.inst["profielen"] = [bestaand.get(n, {"naam": n}) for n in self.inst["personen"]]
+        self.inst.update(schoon_menu(self.inst))
         self._sync_ts = 0
         self.save()
 

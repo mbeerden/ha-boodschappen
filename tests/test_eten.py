@@ -14,8 +14,20 @@ from custom_components.boodschappen.eten import (  # noqa: E402
     schaal,
     schoon_recept,
     week_start,
-    weekmenu_prompt,
     weekdag_fouten,
+)
+from custom_components.boodschappen.menu import (  # noqa: E402
+    aanwezig_op,
+    context_tekst,
+    controleer_antwoord,
+    dag_info,
+    feedback_lijsten,
+    is_afgewezen,
+    labels_voor,
+    porties_voor,
+    schoon_menu,
+    voorraad_overzicht,
+    voorstel_prompt,
 )
 
 
@@ -117,7 +129,75 @@ def test_weekdag_fouten():
     assert "precies" in weekdag_fouten([{"datum": "2026-10-12", "dag": "maandag"}], dagen)
 
 
-def test_weekmenu_prompt_bevat_vaste_dagen():
-    p = weekmenu_prompt([{"datum": "2026-10-15", "dag": "donderdag", "vast": "Bij opa"}],
-                        [{"id": "r1", "naam": "Chili"}], "Woensdag kookt A", "iets met vis", date(2026, 10, 11))
-    assert "Bij opa" in p and "Woensdag kookt A" in p and "iets met vis" in p and "zondag" in p
+
+
+# --- weekmenu-advies ---------------------------------------------------------
+def _menu():
+    return schoon_menu({
+        "profielen": [
+            {"naam": "A"}, {"naam": "B", "dieet": "vegetarisch"}, {"naam": "K", "kind": True, "lievelingskost": "soep"},
+            {"naam": "S", "patroon": {"soort": "omdeweek", "dagen": [2, 3, 4], "dagen_b": [2, 3, 4, 5], "anker": "2026-11-04"}},
+            {"naam": "W", "patroon": {"soort": "dagen", "dagen": [5, 6]}},
+        ],
+        "weekdagen": [{"soort": "vriezer"}, {"soort": "vriezer"}, {"kookt": "A", "minuten": 40}, {"soort": "anders", "notitie": "Opa kookt"},
+                      {"kookt": "B"}, {"minuten": 20, "notitie": "iets makkelijks"}, {"vriezer": 6, "minuten": 60}],
+        "stijl": {"apparaten": "stoomoven, airfryer", "voorkeuren": "gezond"},
+    })
+
+
+def test_schoon_menu_en_oude_personen():
+    m = schoon_menu({"personen": ["A", "B"]})
+    assert m["personen"] == ["A", "B"] and m["profielen"][0]["patroon"]["soort"] == "altijd"
+    assert len(m["weekdagen"]) == 7 and m["weekdagen"][0]["soort"] == "koken"
+    m = _menu()
+    assert m["stijl"]["apparaten"] == ["stoomoven", "airfryer"]
+    assert m["profielen"][3]["patroon"]["anker"] == "2026-11-02"   # naar de maandag van die week
+
+
+def test_aanwezigheid_om_de_week_en_porties():
+    m = _menu()
+    p = m["profielen"]
+    # week van het anker (2 nov) = week A: wo t/m vr; week erna = week B: wo t/m za
+    assert aanwezig_op(p, date(2026, 11, 7)) == ["A", "B", "K", "W"]            # zaterdag week A: S niet
+    assert aanwezig_op(p, date(2026, 11, 14)) == ["A", "B", "K", "S", "W"]      # zaterdag week B: S wel
+    assert "S" in aanwezig_op(p, date(2026, 10, 28))                             # ook terug in de tijd (week A)
+    assert porties_voor(p, ["A", "B", "K"]) == 3 and porties_voor(p, ["A", "K"]) == 2
+    d = dag_info(m, date(2026, 11, 8))                                            # zondag
+    assert d["soort"] == "koken" and d["vriezer"] == 6 and d["minuten"] == 60 and d["dag"] == "zondag"
+    assert dag_info(m, date(2026, 11, 5))["soort"] == "anders"
+
+
+def test_voorraad_labels_en_feedback():
+    voorraad, bijna = voorraad_overzicht([
+        {"product_id": 1, "amount": 2, "best_before_date": "2026-11-03"},
+        {"product_id": 2, "amount": 1, "best_before_date": "2999-12-31"},
+        {"product_id": 3, "amount": 0},
+    ], date(2026, 11, 1))
+    assert voorraad == {1: 2.0, 2: 1.0} and bijna == {1}
+    r = {"ingredienten": [{"tekst": "courgette", "product_id": 1}, {"tekst": "rijst", "product_id": 2},
+                          {"tekst": "kip", "product_id": 4}, {"tekst": "zout", "product_id": 5, "basis": True}]}
+    lab = labels_voor(r, voorraad, bijna, {4: {"actie": "1+1", "winkel": "Lidl"}}, {1: "Courgette", 2: "Rijst", 4: "Kipfilet"})
+    assert lab == {"actie": ["Kipfilet (1+1, Lidl)"], "in_huis": ["Rijst"], "bijna_op": ["Courgette"]}
+    fb = {"r1": {"recept_id": "r1", "titel": "Curry", "soorten": {"niet_lekker": "2026-11-01"}},
+          "titel:wrap": {"recept_id": None, "titel": "Wrap", "soorten": {"lekker_snel": "x", "wel_lekker": "x"}}}
+    assert is_afgewezen(fb, "r1", "Curry") and is_afgewezen(fb, None, "curry") and not is_afgewezen(fb, None, "Wrap")
+    assert [x["titel"] for x in feedback_lijsten(fb)["lekker_snel"]] == ["Wrap"]
+
+
+def test_voorstel_prompt_en_controle():
+    m = _menu()
+    ctx = context_tekst(m, "Pizza op zaterdag", {"r1": {"titel": "Curry", "soorten": {"niet_lekker": "x"}}}, date(2026, 11, 1))
+    assert "B; dieet: vegetarisch" in ctx and "K (kind)" in ctx and "stoomoven" in ctx and "november" in ctx
+    assert "NIET lekker" in ctx and "Curry" in ctx and "Pizza op zaterdag" in ctx
+    dag = {**dag_info(m, date(2026, 11, 8)), "wens": "soep", "agenda": "Curry (3x)"}
+    p = voorstel_prompt([dag], [{**dag_info(m, date(2026, 11, 9)), "vast_titel": "Restjes"}], m["profielen"], ctx, "snel",
+                        [{"id": "r1", "naam": "Soep"}], {1: "Courgette"}, {1: 1.0}, {1}, {1: {"actie": "-30%", "winkel": "Jumbo"}},
+                        date(2026, 11, 1))
+    assert "- ZONDAG 2026-11-08 — wij koken" in p and "kook 6 extra porties voor de vriezer" in p and "wens voor deze dag: soep" in p
+    assert "eten mee: A, B, K (kind)" in p and "staat al vast: Restjes" in p and "Courgette: -30% bij Jumbo" in p
+    assert "Gaat bijna over de datum (eerst opmaken): Courgette" in p and "precies 3 opties" in p
+    goed = [{"datum": "2026-11-08", "dag": "zondag", "opties": [{}, {}, {}]}]
+    assert controleer_antwoord(goed, [dag]) == ""
+    assert "3 opties" in controleer_antwoord([{"datum": "2026-11-08", "dag": "zondag", "opties": [{}]}], [dag])
+    assert "is een zondag" in controleer_antwoord([{"datum": "2026-11-08", "dag": "maandag", "opties": [{}, {}, {}]}], [dag])
+    assert controleer_antwoord({"x": 1}, [dag])

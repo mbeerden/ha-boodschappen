@@ -296,7 +296,27 @@ async def _e_koppel(e, msg):
 
 
 async def _e_voorstel(e, msg):
-    await e.voorstel_maken(msg["start"], int(msg.get("dagen") or 7), msg.get("wens") or "")
+    await e.voorstel_maken(msg["dagen"], msg.get("wens") or "")
+
+
+async def _e_dagen(e, msg):
+    return e.dagen_info(msg["van"], msg["tot"])
+
+
+async def _e_voorstel_dag(e, msg):
+    await e.voorstel_dag_opnieuw(msg["datum"], msg.get("wens") or "")
+
+
+async def _e_benodigd(e, msg):
+    return await e.benodigd_overzicht(msg["plan_ids"])
+
+
+async def _e_lijst_toevoegen(e, msg):
+    return await e.lijst_toevoegen(msg["plan_ids"], msg.get("regels") or [], msg.get("los") or [])
+
+
+async def _e_feedback(e, msg):
+    e.feedback(msg.get("recept_id"), msg.get("titel"), msg["soort"], bool(msg.get("aan", True)))
 
 
 async def _e_voorstel_wijzig(e, msg):
@@ -369,8 +389,16 @@ ETEN_COMMANDS = [
     ({vol.Required("type"): "boodschappen/eten_import", vol.Optional("url"): vol.Any(None, str),
       vol.Optional("tekst"): vol.Any(None, str)}, _e_import, False),
     ({vol.Required("type"): "boodschappen/eten_koppel", vol.Required("recept_id"): str}, _e_koppel, False),
-    ({vol.Required("type"): "boodschappen/eten_voorstel", vol.Required("start"): str, vol.Optional("dagen"): int,
+    ({vol.Required("type"): "boodschappen/eten_voorstel", vol.Required("dagen"): [dict],
       vol.Optional("wens"): vol.Any(None, str)}, _e_voorstel, False),
+    ({vol.Required("type"): "boodschappen/eten_dagen", vol.Required("van"): str, vol.Required("tot"): str}, _e_dagen, False),
+    ({vol.Required("type"): "boodschappen/eten_voorstel_dag", vol.Required("datum"): str,
+      vol.Optional("wens"): vol.Any(None, str)}, _e_voorstel_dag, False),
+    ({vol.Required("type"): "boodschappen/eten_benodigd", vol.Required("plan_ids"): [str]}, _e_benodigd, False),
+    ({vol.Required("type"): "boodschappen/eten_lijst_toevoegen", vol.Required("plan_ids"): [str],
+      vol.Optional("regels"): [dict], vol.Optional("los"): [dict]}, _e_lijst_toevoegen, False),
+    ({vol.Required("type"): "boodschappen/eten_feedback", vol.Optional("recept_id"): vol.Any(None, str),
+      vol.Optional("titel"): vol.Any(None, str), vol.Required("soort"): str, vol.Optional("aan"): bool}, _e_feedback, False),
     ({vol.Required("type"): "boodschappen/eten_voorstel_wijzig", vol.Required("datum"): str,
       vol.Required("velden"): dict}, _e_voorstel_wijzig, False),
     ({vol.Required("type"): "boodschappen/eten_voorstel_weg"}, _e_voorstel_weg, False),

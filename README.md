@@ -16,7 +16,10 @@ Een eenvoudige boodschappenlijst per winkel bovenop [Grocy](https://grocy.info),
 
 - **Eten** (aparte pagina `/eten`): recepten, weekmenu en beoordelingen, zonder losse receptenapp.
   - *Recepten* toevoegen via een link (schema.org-recept of paginatekst), geplakte tekst of zelf invullen; de AI-taak zet het om en koppelt de ingrediënten aan je Grocy-producten.
-  - *Weekmenu*: de AI-taak doet een voorstel op basis van je huisregels, de recepten, wat recent gegeten is en de beoordelingen per persoon. Na goedkeuren komen de maaltijden in een agenda naar keuze (bijv. een gedeelde Google-agenda) en de ontbrekende ingrediënten op de boodschappenlijst van de juiste winkel.
+  - *Weekmenu voorstellen*: kies zelf de periode en per dag wie er mee-eet, wie kookt, hoeveel tijd er is en of je kookt, uit de vriezer eet of iemand anders kookt. De AI-taak geeft per dag 3 opties (favoriet, slim met aanbiedingen en voorraad, nieuw om te proberen), met labels voor wat in de aanbieding is, wat in huis is en wat bijna over de datum gaat.
+  - *Leren van feedback*: 👍 wel lekker, ⚡ lekker snel, 👎 niet lekker (nooit meer voorstellen) en 🕒 teveel werk, in het voorstel, bij een recept en na het eten.
+  - *Benodigde producten*: na akkoord komen de maaltijden in een agenda naar keuze (bijv. een gedeelde Google-agenda) en zie je eerst een overzicht per winkel (nodig, in huis, al op de lijst) voordat je met één knop alles op de boodschappenlijsten zet.
+  - *Profielen*: per persoon dieet, allergieën, wat iemand niet eet, lievelingskost, kind (halve portie) en wanneer iemand mee-eet (altijd, vaste dagen of om de week verschillend); per weekdag de standaard; kookstijl en afwisseling.
   - *Aanpassen met de AI*: per dag (in het voorstel of al gepland) een wens opgeven, bijv. "een ovenschotel". De AI kiest een passend recept of schrijft een nieuw recept, dat pas in je bibliotheek komt als je het voorstel goedkeurt of de suggestie toepast.
   - *Geen maaltijd*: markeer een dag waarop jullie niet koken; komt zo in de agenda, zonder boodschappen.
   - De agenda blijft bruikbaar op je telefoon: verschuif of verwijder je daar een maaltijd, dan neemt de planning dat over. Events zonder kenmerk (zelf ingevoerd) zie je ook en kun je aan een recept koppelen.
@@ -70,8 +73,8 @@ show_header: false              # standaard; true toont de titelbalk
 
 ## Eten instellen
 
-Open *Eten → ⚙* en kies de agenda, het tijdstip van de maaltijd, de personen die beoordelen en je huisregels
-(vrije tekst voor het voorstel, bijv. wie op welke dag kookt, wie mee-eet, vriezerdagen, dieetwensen).
+Open *Eten → ⚙*: personen (dieet, allergieën, wanneer ze mee-eten), per weekdag wie kookt en hoeveel tijd er is,
+kookstijl en apparaten, afwisseling, overige afspraken, de agenda en het tijdstip van de maaltijd.
 
 ## Ontwikkelen
 

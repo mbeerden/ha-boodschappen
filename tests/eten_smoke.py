@@ -89,27 +89,25 @@ async def main():
         AI_LOG.append(call.data["instructions"])
         instr = call.data["instructions"]
         if "weekmenu" in call.data["task_name"]:
-            dagen = []
-            for m in re.finditer(r"^- ([A-Z]+) (\d{4}-\d{2}-\d{2})(?: — (vast|in de agenda staat): (.*))?$", instr, re.M):
-                d = {"datum": m.group(2), "dag": m.group(1).lower()}
-                if m.group(3) == "vast":
-                    d["vast"] = m.group(4)
-                elif m.group(3):
-                    d["agenda"] = m.group(4)
-                dagen.append(d)
-            recepten = json.loads(re.search(r"Recepten: (\[.*\])$", instr, re.S).group(1))
+            blok = instr.split("Te plannen dagen:\n", 1)[1].split("\n\n", 1)[0]
+            dagen = [{"datum": m.group(2), "dag": m.group(1).lower()}
+                     for m in re.finditer(r"^- ([A-Z]+) (\d{4}-\d{2}-\d{2}) — wij koken", blok, re.M)]
+            recepten = json.loads(re.search(r"Recepten: (\[.*?\])\n\nProducten", instr, re.S).group(1))
+            per = {r["naam"]: r["id"] for r in recepten}
             uit = []
-            recepten.sort(key=lambda r: r["naam"] != "Linzensoep")
-            for n, d in enumerate([d for d in dagen if not d.get("vast")] and dagen):
-                if d.get("agenda") and "vriezer" in d["agenda"]:
-                    uit.append({"datum": d["datum"], "dag": d["dag"], "recept_id": recepten[0]["id"], "titel": recepten[0]["naam"],
-                                "kookt": "Papa", "porties": 4, "boodschappen": False})
-                elif d.get("vast") or d.get("agenda"):
-                    uit.append({"datum": d["datum"], "dag": d["dag"], "titel": d.get("vast") or d["agenda"], "kookt": "opa", "boodschappen": False})
-                else:
-                    rec = recepten[sum(1 for x in uit if x.get("recept_id")) % len(recepten)]
-                    uit.append({"datum": d["datum"], "dag": d["dag"], "recept_id": rec["id"], "titel": rec["naam"], "kookt": "Papa",
-                                "porties": 8, "vriezer": 4, "boodschappen": True, "reden": "lekker"})
+            for d in dagen:
+                opties = []
+                if "Linzensoep" in per:
+                    opties.append({"rol": "favoriet", "recept_id": per["Linzensoep"], "titel": "Linzensoep", "reden": "lekker"})
+                if "Wraps" in per:
+                    opties.append({"rol": "slim", "recept_id": per["Wraps"], "titel": "Wraps", "reden": "wraps in de aanbieding"})
+                opties.append({"rol": "nieuw", "recept_id": None, "titel": "Vega goulash", "reden": "eens proberen", "nieuw_recept": {
+                    "naam": "Vega goulash", "porties": 5, "tijd": 50, "vega": True, "tags": ["stoof"],
+                    "ingredienten": [{"tekst": "3 lente-uitjes", "product_id": 23, "aantal": 3}, {"tekst": "paprikapoeder", "basis": True}],
+                    "stappen": ["Snijd", "Stoof 40 min"]}})
+                while len(opties) < 3:
+                    opties.append({"rol": "nieuw", "recept_id": None, "titel": f"Extra {len(opties)}", "reden": "-"})
+                uit.append({"datum": d["datum"], "dag": d["dag"], "opties": opties})
             return {"data": json.dumps(uit)}
         if "dag aanpassen" in call.data["task_name"]:
             dag = re.search(r"Deze dag: ([A-Z]+) (\S+)", instr)
@@ -172,33 +170,56 @@ async def main():
     await e.sync(forceer=True)
     check([x["titel"] for x in e.extern] == ["Nasi (opa en oma)"], "los agenda-event zichtbaar, hele-dag-event genegeerd")
 
-    # 'uit de vriezer' in de agenda blijft zo staan, ook als de AI er een recept bij zoekt
+    # dagen-info voor de keuzestap: standaard uit de profielen en dagregels
     dag6 = (VANDAAG + timedelta(days=6)).isoformat()
-    await hass.services.async_call("calendar", "create_event", {"summary": "Soep (uit de vriezer)", "start_date_time": f"{dag6} 17:00:00",
-        "end_date_time": f"{dag6} 18:00:00"}, target={"entity_id": "calendar.eet_planning"}, blocking=True)
-    await e.voorstel_maken(dag6, 1, "")
-    vd = e.s["voorstel"]["dagen"][0]
-    check(vd["titel"] == "Soep (uit de vriezer)" and not vd["recept_id"] and not vd["boodschappen"], "vriezerdag blijft vriezerdag")
-    e.voorstel_weg()
-    await e._extern_weg(vd["vervangt"])
-    await e.sync(forceer=True)
+    info = e.dagen_info(morgen.isoformat(), dag6)
+    check(len(info) == 6 and info[0]["agenda"] == "Nasi (opa en oma)" and info[0]["aanwezig"] == ["A", "B", "C"] and info[0]["aan"],
+          "dagen-info met aanwezigen en agenda-idee")
 
-    # weekmenu voorstellen voor 3 dagen vanaf morgen
-    await e.voorstel_maken(morgen.isoformat(), 3, "iets met soep")
+    # vriezerdag: geen AI-opties, vaste titel, geen boodschappen
+    vragen.clear()
+    await e.voorstel_maken([{"datum": dag6, "aan": True, "soort": "vriezer"}], "")
+    vd = e.s["voorstel"]["dagen"][0]
+    check(not vd["opties"] and e._gekozen(vd)["titel"] == "Uit de vriezer" and not vragen, "vriezerdag zonder AI, vaste titel")
+    e.voorstel_weg()
+
+    # weekmenu voorstellen voor 3 dagen vanaf morgen, met 3 opties per dag
+    dagen3 = [(morgen + timedelta(days=i)).isoformat() for i in range(3)]
+    await e.voorstel_maken([{"datum": dagen3[0], "aan": True, "aanwezig": ["A", "B", "C"]},
+                            {"datum": dagen3[1], "aan": True, "aanwezig": ["A", "B", "C"], "wens": "iets met soep"},
+                            {"datum": dagen3[2], "aan": True, "aanwezig": ["A", "B", "C"]}], "lekker herfstig")
     v = e.s["voorstel"]
     d0 = v["dagen"][0]
-    check(len(v["dagen"]) == 3 and d0["agenda"] == "Nasi (opa en oma)" and d0["vervangt"] and not d0["boodschappen"],
-          "agenda-idee meegegeven en wordt vervangen")
-    e.voorstel_wijzig(v["dagen"][2]["datum"], {"recept_id": rid2, "porties": 4})
-    check(e.s["voorstel"]["dagen"][2]["titel"] == "Wraps", "dag in voorstel gewijzigd")
+    check(len(v["dagen"]) == 3 and all(len(x["opties"]) == 3 for x in v["dagen"]) and d0["keuze"] == 0, "3 dagen met elk 3 opties")
+    check(d0["agenda"] == "Nasi (opa en oma)" and d0["vervangt"] and d0["porties"] == 3, "agenda-idee meegegeven, porties uit aanwezigen")
+    check("in de agenda staat al als idee: Nasi (opa en oma)" in AI_LOG[-1] and "wens voor deze dag: iets met soep" in AI_LOG[-1]
+          and "In huis: Uien" in AI_LOG[-1], "prompt met agenda, wens per dag en voorraad")
+    soep = d0["opties"][0]
+    check(soep["labels"]["in_huis"] == ["Uien"] and soep["rol"] == "favoriet", "labels: uien in huis")
+    nieuw_c = d0["opties"][2]["concept"]
+    check(nieuw_c and nieuw_c["id"] not in e.s["recepten"] and "nieuw" in nieuw_c["tags"], "nieuw recept als concept, nog niet bewaard")
+    e.voorstel_wijzig(dagen3[1], {"keuze": 1})
+    e.voorstel_wijzig(dagen3[2], {"keuze": 2})
     STATE["log"].clear()
     res = await e.voorstel_goedkeuren()
-    check(res["gepland"] == 3, f"3 dagen gepland ({res})")
+    check(res["gepland"] == 3 and len(res["plan_ids"]) == 3, f"3 dagen gepland ({res})")
+    check(not [l for l in STATE["log"] if l[0] == "add"], "nog niets op de lijst voor het overzicht")
+    concept_id = next(p for p in e.s["planning"] if p["datum"] == dagen3[2])["recept_id"]
+    check(concept_id in e.s["recepten"], "gekozen nieuw recept nu in de bibliotheek")
+    ov = await e.benodigd_overzicht(res["plan_ids"])
+    rij = {r["product_id"]: r for r in ov["rijen"]}
+    print("   overzicht:", [(r["naam"], r["nodig"], r["in_huis"], r["toevoegen"]) for r in ov["rijen"]])
+    # 3 porties: linzensoep (4p) 2 uien -> 2, 1 in huis -> 1; paprika 2; wraps 1; goulash (5p) 3 lente-ui -> 2
+    check(rij[15]["toevoegen"] == 1 and rij[15]["in_huis"] == 1 and rij[7]["toevoegen"] == 2 and rij[1]["toevoegen"] == 1
+          and rij[23]["toevoegen"] == 2, "benodigd: geschaald op porties, voorraad afgetrokken")
+    n = await e.lijst_toevoegen(ov["plan_ids"], [{"product_id": r["product_id"], "aantal": r["toevoegen"], "list_id": r["list_id"]}
+                                                 for r in ov["rijen"] if r["product_id"] != 7], [{"tekst": "verse kruiden"}])
     adds = [l[1] for l in STATE["log"] if l[0] == "add"]
     print("   op lijst:", [(a.get("product_id"), a.get("amount"), a.get("note")) for a in adds])
-    # Linzensoep 8 porties = 2x: uien 4 (1 in huis -> 3), paprika 4; wraps 1
     per = {a["product_id"]: a["amount"] for a in adds}
-    check(per.get(15) == 3 and per.get(7) == 4 and per.get(1) == 1, "ingrediënten geschaald, voorraad afgetrokken")
+    check(n == 4 and per.get(15) == 1 and 7 not in per and per.get(23) == 2 and any(a.get("note") == "verse kruiden" for a in adds),
+          "alleen gekozen producten op de lijst, los item als tekst")
+    check(all(p["op_lijst"] for p in e.s["planning"] if p["id"] in ov["plan_ids"]), "planning gemarkeerd als op de lijst")
 
     # events in de agenda met kenmerk
     tz = hass.config.time_zone
@@ -211,7 +232,7 @@ async def main():
     eigen = [x for x in evs if "eten:" in (x.get("description") or "")]
     check(len(eigen) == 3 and len([x for x in evs if "17:00" in x["start"]]) == 3, "3 events om 17:00 met kenmerk, los event vervangen")
     check(all(p.get("uid") for p in e.s["planning"]), "uid van events opgeslagen")
-    check(any("Porties: 8 (4 naar de vriezer)" in x["description"] for x in eigen), "beschrijving met porties/vriezer")
+    check(any("Porties: 3" in x["description"] for x in eigen), "beschrijving met porties")
 
     # in de agenda verschuiven: eerste maaltijd naar dag 5
     plan = sorted(e.s["planning"], key=lambda p: p["datum"])[0]
@@ -295,43 +316,33 @@ async def main():
     handlers = hass.data[wsc.DOMAIN] if wsc.DOMAIN in hass.data else {}
     check("boodschappen/eten_goedkeuren" in handlers, "websocket-commando's geregistreerd")
 
-    # --- dag aanpassen met de AI ---
+    # --- per dag nieuwe opties, feedback, weggooien ---
     dag12 = (VANDAAG + timedelta(days=12)).isoformat()
-    await e.voorstel_maken(dag12, 2, "")
-    await e.dag_aanpassen(dag12, "een vegetarische goulash")
-    vd = next(x for x in e.s["voorstel"]["dagen"] if x["datum"] == dag12)
-    cid = vd["concept"]["id"] if vd.get("concept") else None
-    check(cid and vd["recept_id"] == cid and vd["titel"] == "Vega goulash" and cid not in e.s["recepten"],
-          "voorstel-dag vervangen door nieuw recept (nog niet in bibliotheek)")
-    check("nieuw" in vd["concept"]["tags"] and vd["wens"] == "een vegetarische goulash", "concept met label nieuw en wens")
-    e.voorstel_wijzig(dag12, {"porties": 5})
-    # concept herstellen/bewerken via wijzig
-    c2 = {**vd["concept"], "stappen": ["Snijd", "Stoof 45 min"]}
-    e.voorstel_wijzig(dag12, {"concept": c2, "recept_id": c2["id"], "wens": "x"})
-    vd = next(x for x in e.s["voorstel"]["dagen"] if x["datum"] == dag12)
-    check(vd["concept"]["id"] == cid and vd["concept"]["stappen"][1] == "Stoof 45 min" and vd["recept_id"] == cid,
-          "concept via wijzig te herstellen")
-    STATE["log"].clear()
-    await e.voorstel_goedkeuren()
-    p12 = next(p for p in e.s["planning"] if p["datum"] == dag12)
-    check(cid in e.s["recepten"] and p12["recept_id"] == cid, "na goedkeuren in bibliotheek en gepland")
-    adds = {l[1].get("product_id"): l[1].get("amount") for l in STATE["log"] if l[0] == "add"}
-    check(adds.get(23) == 3, f"ingrediënten nieuw recept op de lijst ({adds})")
-
-    # weggegooid voorstel: concept komt niet in de bibliotheek
-    dag14 = (VANDAAG + timedelta(days=14)).isoformat()
-    await e.voorstel_maken(dag14, 1, "")
-    await e.dag_aanpassen(dag14, "goulash")
-    weg_id = e.s["voorstel"]["dagen"][0]["concept"]["id"]
+    await e.voorstel_maken([{"datum": dag12, "aan": True}], "")
+    e.feedback(rid2, None, "niet_lekker", True)
+    await e.voorstel_dag_opnieuw(dag12, "iets warms")
+    vd = e.s["voorstel"]["dagen"][0]
+    check(vd["wens"] == "iets warms" and "Wraps" not in [o["titel"] for o in vd["opties"]]
+          and '"Wraps"' not in AI_LOG[-1].split("Recepten: ")[1].split("Producten")[0], "niet lekker: niet meer voorgesteld")
+    check("Vinden we NIET lekker" in AI_LOG[-1] and "Wraps" in AI_LOG[-1], "feedback in de prompt")
+    e.feedback(rid2, None, "niet_lekker", False)
+    e.feedback(None, "Vega goulash", "lekker_snel", True)
+    check(e.s["feedback"]["titel:vega goulash"]["soorten"].get("lekker_snel"), "feedback op titel (concept)")
+    e.feedback(None, "Vega goulash", "teveel_werk", True)
+    check(list(e.s["feedback"]["titel:vega goulash"]["soorten"]) == ["teveel_werk"], "tegenstrijdige feedback vervangen")
+    weg_id = next(o["concept"]["id"] for o in vd["opties"] if o.get("concept"))
     e.voorstel_weg()
     check(weg_id not in e.s["recepten"], "weggegooid concept niet bewaard")
+    p12 = await e.plan(dag12, {"recept_id": rid})
+    cid = rid
 
     # geplande dag: eerst suggestie, planning blijft tot toepassen
     oud_uid = p12["uid"]
     await e.dag_aanpassen(dag12, "iets anders", p12["id"])
     sug = e.s["suggesties"].get(dag12)
     check(sug and p12["recept_id"] == cid and p12["uid"] == oud_uid, "suggestie getoond, planning ongewijzigd")
-    await e.suggestie_toepassen(dag12)
+    r_t = await e.suggestie_toepassen(dag12)
+    check(r_t["plan_ids"] == [p12["id"]], "toepassen geeft plan voor het boodschappenoverzicht")
     check(p12["recept_id"] == sug["recept_id"] and p12["uid"] != oud_uid and dag12 not in e.s["suggesties"],
           "suggestie toegepast, agenda bijgewerkt")
     await e.dag_aanpassen(dag12, "goulash", p12["id"])
@@ -361,13 +372,10 @@ async def main():
 
     # --- boodschappen eerst uit, later alsnog aan ---
     dag20 = (VANDAAG + timedelta(days=20)).isoformat()
-    await e.voorstel_maken(dag20, 1, "")
     rid20 = e.recept_opslaan({"naam": "Worteltaart", "porties": 4, "ingredienten": [{"tekst": "1 kg wortels", "product_id": 42, "aantal": 1}]})
-    e.voorstel_wijzig(dag20, {"recept_id": rid20, "boodschappen": False})
     STATE["log"].clear()
-    await e.voorstel_goedkeuren()
+    p20 = await e.plan(dag20, {"recept_id": rid20, "boodschappen": False, "lijst": True})
     check(not [l for l in STATE["log"] if l[0] == "add"], "boodschappen uit: niets op de lijst")
-    p20 = next(p for p in e.s["planning"] if p["datum"] == dag20)
     await e.plan(dag20, {"boodschappen": True, "lijst": True}, p20["id"])
     check([l for l in STATE["log"] if l[0] == "add"], "boodschappen later aan: ingrediënten alsnog op de lijst")
     await e.plan_verwijderen(p20["id"])
@@ -382,19 +390,15 @@ async def main():
     g = await e.plan(dag16, {"geen": False, "recept_id": rid, "boodschappen": True}, g["id"])
     check(not g["geen"] and g["recept_id"] == rid, "geen maaltijd weer omgezet naar recept")
     await e.plan_verwijderen(g["id"])
-    # AI zegt geen maaltijd in een voorstel, en via wijzig
-    await e.voorstel_maken(dag16, 1, "")
-    oud = e.s["voorstel"]["dagen"][0]["titel"]
+    # geen maaltijd in een voorstel
+    await e.voorstel_maken([{"datum": dag16, "aan": True}], "")
     e.voorstel_wijzig(dag16, {"geen": True})
     e.voorstel_wijzig(dag16, {"geen": False})
-    check(e.s["voorstel"]["dagen"][0]["titel"] == oud and not e.s["voorstel"]["dagen"][0]["geen"], "geen maaltijd terugdraaien herstelt gerecht")
+    check(e._gekozen(e.s["voorstel"]["dagen"][0])["titel"] == "Linzensoep", "geen maaltijd terugdraaien houdt de keuze")
     e.voorstel_wijzig(dag16, {"geen": True})
-    vg = e.s["voorstel"]["dagen"][0]
-    check(vg["geen"] and vg["boodschappen"] is False, "voorstel-dag op geen maaltijd gezet")
     res = await e.voorstel_goedkeuren()
     pg = next(p for p in e.s["planning"] if p["datum"] == dag16)
-    print("   pg", {k: pg.get(k) for k in ("geen", "titel", "recept_id", "boodschappen")}, res)
-    check(pg["geen"] and pg["titel"] == "Geen maaltijd" and res["op_lijst"] == 0, "goedgekeurd als geen maaltijd")
+    check(pg["geen"] and pg["titel"] == "Geen maaltijd" and res["plan_ids"] == [], "goedgekeurd als geen maaltijd")
     await e.dag_aanpassen(dag16, "we gaan uit eten", pg["id"])
     sg = e.s["suggesties"][dag16]
     check(sg["geen"] and sg["titel"] == "Geen maaltijd" and not sg["recept_id"], "AI-suggestie: geen maaltijd")
