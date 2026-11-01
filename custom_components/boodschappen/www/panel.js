@@ -28,6 +28,9 @@ function zoek(products, q, max = 6) {
   return scored.sort((a, b) => b[0] - a[0]).slice(0, max).map((x) => x[1]);
 }
 
+const svg = (d) => `<svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="${d}"/></svg>`;
+const ICOON_INFO = svg("M11,9H13V7H11M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,17H13V11H11V17Z");
+const ICOON_COG = svg("M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,12.97L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.67 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z");
 const WINKELMODUS_KEY = "boodschappen_winkelmodus";
 const leesWinkelmodus = () => {
   try {
@@ -583,15 +586,16 @@ class BoodschappenPanel extends HTMLElement {
   }
 
   _item(i) {
-    // winkelmodus: notitie klein onder de (i), zodat elk blok één regel hoog blijft
-    const compact = this.winkel && !i.done && i.note;
-    const note = i.note && !compact ? `<small>${esc(i.note)}</small>` : "";
-    let extra = i.done
+    // winkelmodus: geen tekst onder de naam; extra tekst achter de ⓘ, aanpassen achter het tandwiel
+    const note = i.note && !this.winkel ? `<small>${esc(i.note)}</small>` : "";
+    const infoKnop = this.winkel && i.note && !i.done
+      ? `<button class="info" data-act="notitie" data-id="${i.id}" aria-label="Extra informatie bij ${esc(i.name)}" title="${esc(i.note)}">${ICOON_INFO}</button>`
+      : this.winkel && !i.done ? `<span class="info leeg" aria-hidden="true"></span>` : "";
+    const extra = i.done
       ? ""
       : i.product_id
-      ? `<button class="info" data-act="info" data-pid="${i.product_id}" aria-label="Details van ${esc(i.name)}" title="Productdetails">ⓘ</button>`
-      : `<button class="info nieuw" data-act="maakprod" data-id="${i.id}" data-naam="${esc(i.name)}" aria-label="Maak product van ${esc(i.name)}" title="Product aanmaken (vak en winkel)">+</button>`;
-    if (compact) extra = `<span class="infokol">${extra}<small class="knote" title="${esc(i.note)}">${esc(i.note)}</small></span>`;
+      ? `${infoKnop}<button class="info" data-act="info" data-pid="${i.product_id}" aria-label="${esc(i.name)} aanpassen" title="Product aanpassen">${ICOON_COG}</button>`
+      : `${infoKnop}<button class="info nieuw" data-act="maakprod" data-id="${i.id}" data-naam="${esc(i.name)}" aria-label="Maak product van ${esc(i.name)}" title="Product aanmaken (vak en winkel)">+</button>`;
     return `<li class="item ${i.done ? "done" : ""}">
       <button class="vink" data-act="vink" data-id="${i.id}" data-done="${i.done ? 0 : 1}" aria-pressed="${i.done}"
         aria-label="${esc(i.name)} ${i.done ? "terugzetten" : "afvinken"}">
@@ -974,6 +978,14 @@ class BoodschappenPanel extends HTMLElement {
         return this._openNieuw(b.dataset.naam, id, 1);
       case "info":
         return this._openDetails(Number(b.dataset.pid));
+      case "notitie": {
+        const it = this.data.items.find((x) => x.id === id);
+        if (!it) return;
+        this.modal = { soort: "notitie" };
+        return this._toonModal(`<h2>${esc(it.name)}</h2><p class="notitietekst">${esc(it.note || "")}</p>
+          <div class="knoppen">${it.product_id ? `<button class="sec-btn" data-act="info" data-pid="${it.product_id}">Product aanpassen</button>` : ""}
+          <span class="vul"></span><button class="primary" data-act="modsluit">Sluiten</button></div>`);
+      }
       case "modsluit":
         return this._sluitModal();
       case "nieuwmaak":
@@ -1118,11 +1130,13 @@ header .vul { flex: 1; }
 :host(.winkel) .naam { font-size: 16px; }
 :host(.winkel) .stop h2 { padding: 4px 0 2px; }
 :host(.winkel) .stepper button { height: 38px; }
-:host(.winkel) button.info { height: 38px; }
-.infokol { flex: none; position: relative; align-self: stretch; width: 36px; margin-right: 4px; }
-.infokol button.info { position: absolute; top: 2px; left: 0; height: 30px; margin: 0; }
-.knote { position: absolute; right: 0; bottom: 3px; max-width: 96px; font-size: 10px; line-height: 1.2; color: var(--secondary-text-color);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; pointer-events: none; }
+:host(.winkel) button.info { height: 38px; width: 34px; margin-right: 2px; }
+:host(.winkel) .info.leeg { width: 34px; margin-right: 2px; }
+:host(.winkel) .stepper button { width: 34px; }
+:host(.winkel) .vink { gap: 10px; padding-left: 10px; }
+:host(.winkel) .naam { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.txt { overflow: hidden; }
+.naam { overflow-wrap: anywhere; }
 
 /* Onderbalk: mandje en afronden */
 .onder { flex: none; position: relative; background: var(--card-background-color); border-top: 1px solid var(--rand);
@@ -1240,11 +1254,15 @@ button.info { flex: none; width: 36px; height: 44px; margin-right: 4px; border-r
 button.info.nieuw { font-size: 22px; color: var(--route); font-weight: 600; }
 button.info:active { background: var(--zacht); }
 .sugg .nieuwprod { border-style: dashed; color: var(--route); font-weight: 500; }
-.modal { position: absolute; inset: 0; z-index: 10; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; justify-content: center; }
+.modal { position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,.45); display: flex; align-items: flex-start; justify-content: center;
+  padding: max(12px, env(safe-area-inset-top, 0px)) 10px 10px; }
 .modal[hidden] { display: none; }
-.venster { width: 100%; max-width: 520px; max-height: 90%; overflow-y: auto; background: var(--card-background-color);
-  border-radius: 18px 18px 0 0; padding: 16px 16px 20px; display: grid; gap: 10px; box-shadow: 0 -4px 20px rgba(0,0,0,.25); }
-@media (min-width: 700px) { .modal { align-items: center; } .venster { border-radius: 18px; } }
+.venster { width: 100%; max-width: 520px; max-height: calc(100% - 8px); overflow-y: auto; background: var(--card-background-color);
+  border-radius: 18px; padding: 16px 16px 18px; display: grid; gap: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+@media (min-width: 700px) { .modal { padding-top: 10vh; } }
+.notitietekst { margin: 0; font-size: 16px; line-height: 1.4; overflow-wrap: anywhere; }
+button.info svg { display: block; margin: 0 auto; }
+.info.leeg { display: inline-block; flex: none; width: 36px; margin-right: 4px; }
 .venster h2 { margin: 0 0 2px; font-size: 19px; font-weight: 500; }
 .venster .rij3 { display: flex; gap: 8px; flex-wrap: wrap; }
 .venster .rij3 .veld { flex: 1; min-width: 90px; }
