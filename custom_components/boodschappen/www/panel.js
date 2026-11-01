@@ -59,7 +59,8 @@ const STATUS = {
   aangevuld: ["Prijs + extra geboekt", "ok"],
   ongepland: ["Ongepland geboekt", "info"],
   "te koppelen": ["Te koppelen", "warn"],
-  genegeerd: ["Genegeerd", "mute"],
+  genegeerd: ["Altijd negeren", "mute"],
+  overgeslagen: ["Overgeslagen", "mute"],
   fout: ["Fout", "err"],
   nieuw: ["Nieuw", "mute"],
 };
@@ -759,7 +760,7 @@ class BoodschappenPanel extends HTMLElement {
       const tel = {};
       b.regels.forEach((r) => (tel[r.status] = (tel[r.status] || 0) + 1));
       const samenv = Object.entries(tel)
-        .filter(([s]) => s !== "genegeerd")
+        .filter(([s]) => s !== "genegeerd" && s !== "overgeslagen")
         .map(([s, n]) => `<span class="chip ${STATUS[s]?.[1] || ""}">${n} ${esc((STATUS[s]?.[0] || s).toLowerCase())}</span>`)
         .join("");
       html += `<article class="bon ${open ? "open" : ""}">
@@ -830,8 +831,10 @@ class BoodschappenPanel extends HTMLElement {
       <p class="hint">Alleen aanpassen als het bedrag verkeerd is uitgelezen (bijv. een actiekorting). Kies daarna het product, of tik op het huidige product om alleen het bedrag te corrigeren.</p>` : ""}
       <div class="knoppen">
         <button class="sec-btn" data-act="nieuw">Nieuw product…</button>
-        <button class="sec-btn" data-act="negeer">Negeren</button>
+        <button class="sec-btn" data-act="overslaan" title="Alleen deze keer: niet koppelen en niets onthouden">Overslaan</button>
+        <button class="sec-btn" data-act="negeer" title="Deze bonregel voortaan altijd overslaan">Altijd negeren</button>
       </div>
+      <p class="hint">Overslaan: alleen deze keer (bijv. een cadeau). Altijd negeren: deze bonregel voortaan automatisch overslaan.</p>
       <div class="nieuwform" hidden>
         <label class="veld">Naam <input class="nnaam" type="text" value="${esc(o.suggestie || "")}"></label>
         <label class="veld">Vak <select class="ngroep">${groups}</select></label>
@@ -1179,6 +1182,7 @@ class BoodschappenPanel extends HTMLElement {
         return this._render();
       }
       case "kies":
+      case "overslaan":
       case "negeer":
       case "nieuw":
       case "maak":
@@ -1206,11 +1210,12 @@ class BoodschappenPanel extends HTMLElement {
       }
       return;
     }
-    if (act === "negeer") {
-      if (mode === "queue") await this._do({ type: "boodschappen/bon_negeer", queue_id: k.dataset.qid });
+    if (act === "negeer" || act === "overslaan") {
+      const onthouden = act === "negeer";
+      if (mode === "queue") await this._do({ type: "boodschappen/bon_negeer", queue_id: k.dataset.qid, onthouden });
       else {
         this.edit = null;
-        await this._do({ type: "boodschappen/bon_herkoppel", bon_id: k.dataset.bon, line_id: k.dataset.line, negeren: true });
+        await this._do({ type: "boodschappen/bon_herkoppel", bon_id: k.dataset.bon, line_id: k.dataset.line, negeren: true, onthouden });
       }
       return;
     }

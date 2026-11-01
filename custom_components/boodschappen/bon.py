@@ -307,7 +307,7 @@ class BonVerwerker:
             self.state["mappings"][self._key(q["winkel"], q["tekst"])] = {"negeren": True, "tekst": q["tekst"], "winkel": q["winkel"]}
         _, line = self._bon_line(q["bon_id"], q["id"])
         if line:
-            line["status"] = "genegeerd"
+            line["status"] = "genegeerd" if onthouden else "overgeslagen"
         self.state["queue"] = [x for x in self.state["queue"] if x["id"] != qid]
         self.c.save()
 
@@ -338,7 +338,7 @@ class BonVerwerker:
         return await self.herkoppel(bon_id, line_id, pid, factor, False, totaal)
 
     async def herkoppel(self, bon_id: str, line_id: str, product_id: int | None, factor: float = 1.0, negeren: bool = False,
-                        totaal: float | None = None) -> dict | None:
+                        totaal: float | None = None, onthouden: bool = True) -> dict | None:
         """Een al verwerkte bonregel corrigeren (andere koppeling, ander aantal per verpakking, ander bedrag, of negeren)."""
         bon, line = self._bon_line(bon_id, line_id)
         if line is None:
@@ -364,8 +364,9 @@ class BonVerwerker:
                 a["prijs"] = None
         key = self._key(bon["winkel"], line["tekst"])
         if negeren:
-            self.state["mappings"][key] = {"negeren": True, "tekst": line["tekst"], "winkel": bon["winkel"]}
-            line["status"] = "genegeerd"
+            if onthouden:
+                self.state["mappings"][key] = {"negeren": True, "tekst": line["tekst"], "winkel": bon["winkel"]}
+            line["status"] = "genegeerd" if onthouden else "overgeslagen"
             self.c.save()
             return line
         self.state["mappings"][key] = {"product_id": int(product_id), "factor": float(factor or 1), "tekst": line["tekst"], "winkel": bon["winkel"]}

@@ -569,3 +569,16 @@ def test_korting_pct():
     assert korting_pct("25% KORTING") == 0.25
     assert korting_pct("UP TO 23% OFF") == 0.23
     assert korting_pct("2 voor 2,99") is None
+
+
+def test_overslaan_onthoudt_niets():
+    c = make_coordinator([])
+    run(c.bon.verwerk("Lidl", None, "s1", [{"bon": "SPEELGOED TREIN", "product": "Trein", "aantal": 1, "totaal": 12.99}]))
+    q = c.state["queue"][0]
+    run(c.bon.negeer(q["id"], onthouden=False))
+    assert c.state["queue"] == [] and c.state["mappings"] == {}
+    assert c.state["bonnen"][0]["regels"][0]["status"] == "overgeslagen"
+    assert c.state["bonnen"][0]["totaal"] == 12.99            # betaald is betaald: telt mee in het bontotaal
+    # volgende keer weer gewoon in de wachtrij
+    run(c.bon.verwerk("Lidl", None, "s2", [{"bon": "SPEELGOED TREIN", "product": "Trein", "aantal": 1, "totaal": 12.99}]))
+    assert len(c.state["queue"]) == 1
