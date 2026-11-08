@@ -22,6 +22,7 @@ from .api import GrocyApi, GrocyError, build_base_url
 from .aanbiedingen import Aanbiedingen
 from .bon import BonVerwerker
 from .eten import Eten
+from .klusjes import Klusjes
 from .producten import Producten
 from .const import (
     CONF_API_KEY,
@@ -41,8 +42,9 @@ SERVICE_BON = "bon_verwerken"
 SERVICE_AANBIEDINGEN = "aanbiedingen_verversen"
 PANEL_URL = "boodschappen"
 ETEN_URL = "eten"
+KLUSJES_URL = "klusjes"
 STATIC_URL = "/boodschappen_static"
-VERSION = "0.9.0"
+VERSION = "0.10.0"
 
 BON_SCHEMA = vol.Schema(
     {
@@ -85,6 +87,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.producten = Producten(coordinator)
     coordinator.eten = Eten(coordinator, entry.entry_id)
     await coordinator.eten.async_load()
+    coordinator.klusjes = Klusjes(coordinator, entry.entry_id)
+    await coordinator.klusjes.async_load()
     entry.runtime_data = coordinator
 
     async def _dagelijks(_now=None) -> None:
@@ -101,6 +105,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Eet-agenda synchroniseren mislukt: %s", err)
 
     entry.async_on_unload(async_track_time_interval(hass, _agenda_sync, timedelta(minutes=30)))
+
+    async def _klusjes_minuut(_now=None) -> None:
+        try:
+            await coordinator.klusjes.melden()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Klusjes-melding mislukt: %s", err)
+
+    async def _klusjes_sync(_now=None) -> None:
+        try:
+            await coordinator.klusjes.sync(forceer=True)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("Klusjes-agenda synchroniseren mislukt: %s", err)
+
+    entry.async_on_unload(async_track_time_change(hass, _klusjes_minuut, second=7))
+    entry.async_on_unload(async_track_time_interval(hass, _klusjes_sync, timedelta(minutes=15)))
 
     async def _mandje_check(_now=None) -> None:
         for m in coordinator.vergeten_mandjes():
@@ -121,6 +140,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if ok and hass.data.pop(f"{DOMAIN}_panel", False):
         frontend.async_remove_panel(hass, PANEL_URL)
         frontend.async_remove_panel(hass, ETEN_URL)
+        frontend.async_remove_panel(hass, KLUSJES_URL)
     return ok
 
 
@@ -149,6 +169,16 @@ async def _register_panel(hass: HomeAssistant) -> None:
         sidebar_title="Eten",
         sidebar_icon="mdi:silverware-fork-knife",
         module_url=f"{STATIC_URL}/eten.js?v={VERSION}",
+        require_admin=False,
+        config={},
+    )
+    await panel_custom.async_register_panel(
+        hass,
+        frontend_url_path=KLUSJES_URL,
+        webcomponent_name="klusjes-panel",
+        sidebar_title="Klusjes",
+        sidebar_icon="mdi:broom",
+        module_url=f"{STATIC_URL}/klusjes.js?v={VERSION}",
         require_admin=False,
         config={},
     )

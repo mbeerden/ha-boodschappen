@@ -26,6 +26,14 @@ Een eenvoudige boodschappenlijst per winkel bovenop [Grocy](https://grocy.info),
   - *Koken*: stap-voor-stap weergave voor een tablet in de keuken (scherm blijft aan), porties schalen.
   - *Beoordelen*: per persoon een score na de maaltijd; telt mee in volgende voorstellen.
 
+- **Klusjes** (aparte pagina `/klusjes`): huishoudtaken op een bord met vier kolommen.
+  - *Backlog*, *Gepland*, *In behandeling* en *Klaar*; op de telefoon als tabbladen, op een groot scherm naast elkaar. *Klaar* toont alleen de laatste dagen (instelbaar), de geschiedenis blijft bewaard.
+  - *Eenmalig of terugkerend* (elke x dagen, weken, maanden of jaren). Rond je een terugkerend klusje af, dan kies je meteen de volgende datum (voorstel: vandaag + interval, met ±1 week); het klusje staat dan weer in *Gepland*. Per ongeluk afgerond? *Terugzetten* haalt het vervolg weer weg.
+  - *Agenda*: geplande klusjes staan als afspraak in een agenda naar keuze (bijv. een gedeelde Google-agenda), met tijd of als hele dag. Verschuif je de afspraak op je telefoon, dan neemt het klusje de nieuwe datum over; verwijder je hem, dan gaat het klusje terug naar de backlog.
+  - *Per persoon*: klusjes toewijzen en filteren; elke dag op een vaste tijd een melding op de telefoon met de klusjes van vandaag en wat te laat is. Per persoon kies je de telefoon en of die ook de klusjes zonder persoon krijgt.
+  - *Overnemen uit de agenda*: herhalende afspraken (bijv. onderhoudstaken) worden met één keer kiezen terugkerende klusjes, met interval, tijd en laatste keer; de oude reeks kan meteen uit de agenda.
+  - Entiteit `todo.klusjes` met de open klusjes (attributen `vandaag`, `te_laat`, `backlog`, `gepland`, `bezig`), zodat je met Assist een klusje toevoegt of afvinkt en het op een dashboard kunt tonen.
+
 Daarnaast maakt de integratie `todo`-entiteiten per winkel, zodat de lijsten ook werken in de standaard To-do-weergave en met Assist ("zet melk op Boodschappen Lidl").
 
 ## Installatie
@@ -35,7 +43,7 @@ Daarnaast maakt de integratie `todo`-entiteiten per winkel, zodat de lijsten ook
 3. Instellingen → Apparaten & diensten → *Integratie toevoegen* → **Boodschappen**.
    Is de [Grocy-integratie](https://github.com/custom-components/grocy) al ingesteld, dan wordt die verbinding hergebruikt; anders vul je Grocy-URL en API-sleutel in.
 
-De pagina staat daarna in de zijbalk als **Boodschappen** (`/boodschappen`).
+De pagina's staan daarna in de zijbalk als **Boodschappen** (`/boodschappen`), **Eten** (`/eten`) en **Klusjes** (`/klusjes`).
 
 ## Grocy voorbereiden
 

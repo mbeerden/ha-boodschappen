@@ -422,6 +422,95 @@ ETEN_COMMANDS = [
 ]
 
 
+# ---------------------------------------------------------------- Klusjes
+def _klus(fn, sync: bool = False):
+    @websocket_api.async_response
+    async def wrapper(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+        c = _coordinator(hass)
+        if c is None or not hasattr(c, "klusjes"):
+            connection.send_error(msg["id"], "not_ready", "Klusjes is niet geladen")
+            return
+        try:
+            if sync:
+                await c.klusjes.sync()
+            extra = await fn(c.klusjes, msg)
+        except ValueError as err:
+            connection.send_error(msg["id"], "failed", str(err))
+            return
+        except Exception as err:  # noqa: BLE001 - agenda/netwerk: melden i.p.v. hangen
+            connection.send_error(msg["id"], "failed", f"{type(err).__name__}: {err}")
+            return
+        result = c.klusjes.payload()
+        if extra is not None:
+            result["resultaat"] = extra
+        connection.send_result(msg["id"], result)
+
+    return wrapper
+
+
+async def _k_data(k, msg):
+    return None
+
+
+async def _k_nieuw(k, msg):
+    return (await k.toevoegen(msg["taak"]))["id"]
+
+
+async def _k_wijzig(k, msg):
+    await k.wijzigen(msg["taak_id"], msg["taak"])
+
+
+async def _k_status(k, msg):
+    await k.status(msg["taak_id"], msg["status"], msg.get("datum"))
+
+
+async def _k_afronden(k, msg):
+    t = await k.afronden(msg["taak_id"], msg.get("volgende"), bool(msg.get("geen_volgende")))
+    return t.get("datum") if t["status"] != "klaar" else None
+
+
+async def _k_heropen(k, msg):
+    await k.heropenen(msg["taak_id"])
+
+
+async def _k_weg(k, msg):
+    await k.verwijderen(msg["taak_id"])
+
+
+async def _k_instellingen(k, msg):
+    k.instellingen_opslaan(msg["instellingen"])
+
+
+async def _k_import_zoek(k, msg):
+    return await k.import_zoeken(msg.get("agenda"))
+
+
+async def _k_import(k, msg):
+    return await k.importeren(msg["keuzes"], bool(msg.get("verwijderen")))
+
+
+async def _k_test(k, msg):
+    return await k.melden(forceer=True, alleen=msg["notify"])
+
+
+KLUSJES_COMMANDS = [
+    ({vol.Required("type"): "boodschappen/klusjes"}, _k_data, True),
+    ({vol.Required("type"): "boodschappen/klusjes_nieuw", vol.Required("taak"): dict}, _k_nieuw, False),
+    ({vol.Required("type"): "boodschappen/klusjes_wijzig", vol.Required("taak_id"): str, vol.Required("taak"): dict}, _k_wijzig, False),
+    ({vol.Required("type"): "boodschappen/klusjes_status", vol.Required("taak_id"): str, vol.Required("status"): str,
+      vol.Optional("datum"): vol.Any(None, str)}, _k_status, False),
+    ({vol.Required("type"): "boodschappen/klusjes_afronden", vol.Required("taak_id"): str,
+      vol.Optional("volgende"): vol.Any(None, str), vol.Optional("geen_volgende"): bool}, _k_afronden, False),
+    ({vol.Required("type"): "boodschappen/klusjes_heropen", vol.Required("taak_id"): str}, _k_heropen, False),
+    ({vol.Required("type"): "boodschappen/klusjes_weg", vol.Required("taak_id"): str}, _k_weg, False),
+    ({vol.Required("type"): "boodschappen/klusjes_instellingen", vol.Required("instellingen"): dict}, _k_instellingen, False),
+    ({vol.Required("type"): "boodschappen/klusjes_import_zoek", vol.Optional("agenda"): vol.Any(None, str)}, _k_import_zoek, False),
+    ({vol.Required("type"): "boodschappen/klusjes_import", vol.Required("keuzes"): [dict],
+      vol.Optional("verwijderen"): bool}, _k_import, False),
+    ({vol.Required("type"): "boodschappen/klusjes_test_melding", vol.Required("notify"): str}, _k_test, False),
+]
+
+
 def async_register(hass: HomeAssistant) -> None:
     if hass.data.get(f"{DOMAIN}_ws"):
         return
@@ -431,3 +520,5 @@ def async_register(hass: HomeAssistant) -> None:
         websocket_api.async_register_command(hass, websocket_api.websocket_command(schema)(handler))
     for schema, fn, sync in ETEN_COMMANDS:
         websocket_api.async_register_command(hass, websocket_api.websocket_command(schema)(_eten(fn, sync)))
+    for schema, fn, sync in KLUSJES_COMMANDS:
+        websocket_api.async_register_command(hass, websocket_api.websocket_command(schema)(_klus(fn, sync)))
