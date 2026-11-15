@@ -36,6 +36,21 @@ async def main():
         return web.json_response([{"product_id": 15, "amount": 1}])  # 1 ui in huis
 
     app.router.add_get("/api/stock", stock)
+
+    # een receptpagina zoals een bron die geeft: JSON-LD met een komma te veel, Engels, tijd alleen in de tekst
+    async def receptpagina(req):
+        return web.Response(content_type="text/html", text="""<html><head><script type="application/ld+json">
+        {"@context": "https://schema.org/", "@type": "Recipe", "name": "Spiced lentil soup",
+         "recipeIngredient": ["2 onions", "1 tsp ground cumin", "250g red lentils", "salt",],
+         "recipeInstructions": [{"@type": "HowToStep", "text": "Fry the onions with the cumin."},
+                                {"@type": "HowToStep", "text": "Add the lentils and simmer for 20 minutes."},]}
+        </script></head><body><p>Serves 4</p><p>Prep 10 min</p><p>Cook 25 min</p></body></html>""")
+
+    async def geenrecept(req):
+        return web.Response(content_type="text/html", text="<html><body><p>Alleen een verhaaltje.</p></body></html>")
+
+    app.router.add_get("/recept", receptpagina)
+    app.router.add_get("/verhaal", geenrecept)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "127.0.0.1", 9192).start()
@@ -123,6 +138,20 @@ async def main():
             rec = json.loads(re.search(r"Recepten: (\[.*?\])\n", instr, re.S).group(1))
             return {"data": json.dumps({"recept_id": rec[0]["id"], "titel": rec[0]["naam"], "kookt": "Mama", "porties": 4,
                                         "vriezer": 0, "boodschappen": True, "reden": "uit de bibliotheek", "nieuw_recept": None})}
+        if "recept van een kok" in instr:
+            # alleen koppelen/vertalen: evenveel regels terug als er in het recept staan
+            blok = instr.split("Ingrediënten:\n", 1)[1].split("\nBereiding:", 1)[0]
+            regels = [r.split(". ", 1)[1] for r in blok.splitlines() if ". " in r]
+            engels = "onions" in blok
+            nl = {"2 onions": "2 uien", "1 tsp ground cumin": "1 tl gemalen komijn", "250g red lentils": "250 g rode linzen", "salt": "zout"}
+            return {"data": json.dumps({
+                "taal": "en" if engels else "nl", "naam": "Gekruide linzensoep" if engels else "X", "vega": True, "tags": ["soep"],
+                "porties": None, "tijd": 35,
+                "ingredienten": [{"tekst": nl.get(r, "VERZONNEN"), "product_id": 15 if "ui" in nl.get(r, r) or "onion" in r else None,
+                                  "aantal": 2, "basis": r in ("salt", "zout") or "cumin" in r} for r in regels],
+                "stappen": ["Fruit de uien met de komijn.", "Voeg de linzen toe en laat 20 minuten pruttelen."] if engels else ["VERZONNEN"]})}
+        if "Alleen een verhaaltje" in instr:
+            return {"data": json.dumps({"naam": None})}
         return {"data": "```json\n" + json.dumps({
             "naam": "Linzensoep", "porties": 4, "tijd": 35, "vega": True, "tags": ["soep"],
             "ingredienten": [{"tekst": "2 uien", "product_id": 15, "aantal": 2},
@@ -161,8 +190,28 @@ async def main():
     await e.recept_koppelen(kale)
     k = e.s["recepten"][kale]
     check(k["vega"] and k["tijd"] == 35 and k["tags"] == ["soep"] and k["ingredienten"][0]["product_id"] == 15
-          and k["stappen"] == ["Kook"], "koppelen vult aan, stappen blijven")
+          and k["ingredienten"][0]["tekst"] == "2 uien" and k["stappen"] == ["Kook"], "koppelen vult aan, teksten blijven")
     e.recept_verwijderen(kale)
+
+    # recept van een bron: letterlijk overgenomen, vertaald, tijd en porties uit de pagina
+    e.instellingen_opslaan({"bronnen": "Testkok | 127.0.0.1"})
+    bid = await e.recept_importeren("http://127.0.0.1:9192/recept", None)
+    b = e.s["recepten"][bid]
+    check(b["naam"] == "Gekruide linzensoep" and [i["tekst"] for i in b["ingredienten"]] ==
+          ["2 uien", "1 tl gemalen komijn", "250 g rode linzen", "zout"], "bronrecept: alle ingrediënten, vertaald")
+    check(len(b["stappen"]) == 2 and b["porties"] == 4 and b["tijd"] == 35 and b["vertaald_uit"] == "en",
+          "bronrecept: stappen, porties en tijd uit de pagina")
+    check(b["ingredienten"][0]["product_id"] == 15 and b["ingredienten"][1]["basis"], "bronrecept: gekoppeld, kruiden als basis")
+    pr = next(x for x in e.payload()["recepten"] if x["id"] == bid)
+    check(pr["herkomst"] == {"soort": "bron", "naam": "Testkok"}, "bronrecept: herkomst is de bron")
+    check(any("kort" in k for k in pr["kwaliteit"]) and not any("smaakmakers" in k for k in pr["kwaliteit"]),
+          "kwaliteitscheck in de payload")
+    try:
+        await e.recept_importeren("http://127.0.0.1:9192/verhaal", None)
+        check(False, "pagina zonder recept wordt geweigerd")
+    except ValueError as err:
+        check("geen volledig recept" in str(err), "pagina zonder recept wordt geweigerd")
+    e.recept_verwijderen(bid)
     rid2 = e.recept_opslaan({"naam": "Wraps", "porties": 4, "ingredienten": [{"tekst": "wraps", "product_id": 1, "aantal": 1}],
                              "stappen": ["Vullen"]})
 

@@ -201,3 +201,106 @@ def test_voorstel_prompt_en_controle():
     assert "3 opties" in controleer_antwoord([{"datum": "2026-11-08", "dag": "zondag", "opties": [{}]}], [dag])
     assert "is een zondag" in controleer_antwoord([{"datum": "2026-11-08", "dag": "maandag", "opties": [{}, {}, {}]}], [dag])
     assert controleer_antwoord({"x": 1}, [dag])
+
+
+# ----------------------------------------------------------------- recepten van een bron
+from custom_components.boodschappen.recept import (  # noqa: E402
+    DEFAULT_BRONNEN,
+    duur_minuten,
+    herkomst,
+    kwaliteit,
+    laad_json_soepel,
+    niet_in_bereiding,
+    recept_van_jsonld,
+    schoon_bronnen,
+    verrijk_toepassen,
+)
+
+OTTOLENGHI = """<html><script type="application/ld+json">
+	{
+		"@context": "https://schema.org/",
+		"@type": "Recipe",
+		"name": "Spiced olive pasta",
+		"author": {"@type": "Organization", "name": "Ottolenghi"},
+		"recipeIngredient": ["200g pasta", "50g unsalted butter", "75g feta cheese",],
+		"recipeInstructions": [
+			{"@type": "HowToStep", "text": "Cook the pasta."},
+			{"@type": "HowToStep", "text": "Melt the butter and stir through."},]}
+</script><body>Serves 2 Prep 5 min Cook 10 min</body></html>"""
+
+
+def test_jsonld_met_komma_te_veel_en_tijd_uit_tekst():
+    assert laad_json_soepel('{"a": [1, 2,],}') == {"a": [1, 2]}
+    ld = recept_uit_jsonld(OTTOLENGHI)
+    r = recept_van_jsonld(ld, "Serves 2\nPrep 5 min\nCook 10 min")
+    assert r["naam"] == "Spiced olive pasta" and r["auteur"] == "Ottolenghi"
+    assert r["porties"] == 2 and r["tijd"] == 15
+    assert r["ingredienten"] == ["200g pasta", "50g unsalted butter", "75g feta cheese"]
+    assert r["stappen"] == ["Cook the pasta.", "Melt the butter and stir through."]
+
+
+def test_recept_van_jsonld_letterlijk():
+    r = recept_van_jsonld(recept_uit_jsonld(PAGE))
+    assert r["porties"] == 4
+    assert "250 g rode linzen" in r["ingredienten"]
+    assert r["stappen"] == ["Fruit de ui.", "Kook de linzen & mix."]
+    assert duur_minuten("PT1H15M") == 75 and duur_minuten("PT30M") == 30 and duur_minuten("") is None
+
+
+def test_verrijk_bron_wint():
+    basis = {"naam": "Soep", "porties": 4, "tijd": None, "ingredienten": ["1 ui", "2 tl komijn", "zout"],
+             "stappen": ["Fruit de ui.", "Voeg komijn toe."]}
+    # Nederlands: de AI mag teksten niet vervangen, ook niet als ze het toch probeert
+    res = {"taal": "nl", "vega": True, "tags": ["soep"], "tijd": 20, "stappen": ["Samengevat."],
+           "ingredienten": [{"tekst": "ui", "product_id": 5, "aantal": 1, "basis": False},
+                            {"tekst": "komijn", "product_id": None, "aantal": 1, "basis": True},
+                            {"tekst": "zout", "product_id": None, "aantal": 1, "basis": True}]}
+    r = verrijk_toepassen(basis, res)
+    assert [i["tekst"] for i in r["ingredienten"]] == ["1 ui", "2 tl komijn", "zout"]
+    assert r["ingredienten"][0]["product_id"] == 5 and r["ingredienten"][1]["basis"] is True
+    assert r["stappen"] == basis["stappen"] and r["tijd"] == 20 and r["vega"] is True
+    # de AI laat een ingrediënt weg: niets raakt kwijt, alleen de koppeling ontbreekt
+    r = verrijk_toepassen(basis, {"taal": "nl", "ingredienten": res["ingredienten"][:2]})
+    assert len(r["ingredienten"]) == 3 and r["ingredienten"][0]["product_id"] is None
+    # Engels: vertaling alleen overnemen als het aantal regels klopt
+    en = {"naam": "Soup", "ingredienten": ["1 onion", "salt"], "stappen": ["Fry.", "Season."]}
+    r = verrijk_toepassen(en, {"taal": "en", "naam": "Soep", "stappen": ["Bak.", "Breng op smaak."],
+                               "ingredienten": [{"tekst": "1 ui", "product_id": 5}, {"tekst": "zout", "basis": True}]})
+    assert r["naam"] == "Soep" and [i["tekst"] for i in r["ingredienten"]] == ["1 ui", "zout"]
+    assert r["stappen"] == ["Bak.", "Breng op smaak."] and r["vertaald_uit"] == "en"
+    r = verrijk_toepassen(en, {"taal": "en", "stappen": ["Alles in één."], "ingredienten": []})
+    assert r["stappen"] == ["Fry.", "Season."] and [i["tekst"] for i in r["ingredienten"]] == ["1 onion", "salt"]
+
+
+def test_kwaliteit():
+    kaal = {"porties": 6, "ingredienten": [{"tekst": t} for t in (
+        "500g volkoren pasta", "700ml passata", "300g wortels", "200g gedroogde linzen", "2 uien", "2 el olijfolie")],
+        "stappen": ["Snipper de uien en snijd de wortels.", "Fruit de ui in olijfolie.", "Kook de pasta."]}
+    punten = kwaliteit(kaal)
+    assert "Geen kruiden of andere smaakmakers" in punten
+    assert "Bereiding is erg kort" in punten
+    assert any(p.startswith("Niet genoemd in de bereiding") and "passata" in p and "linzen" in p for p in punten)
+    assert niet_in_bereiding(kaal) == ["700ml passata", "200g gedroogde linzen"]
+    goed = {"porties": 4, "ingredienten": [{"tekst": t} for t in (
+        "2 teentjes knoflook", "1 ui", "1 rode paprika", "2 tl komijn", "400 g kidneybonen", "zout en peper")],
+        "stappen": ["Snipper de ui en de knoflook en fruit ze een paar minuten in een grote pan tot de ui glazig is.",
+                    "Snijd de paprika in blokjes, voeg toe met de komijn en bak twee minuten mee op middelhoog vuur.",
+                    "Voeg de kidneybonen toe, laat een kwartier zachtjes pruttelen en breng op smaak."]}
+    assert kwaliteit(goed) == []
+    assert "Geen bereiding" in kwaliteit({"porties": 2, "ingredienten": goed["ingredienten"], "stappen": []})
+
+
+def test_bronnen_en_herkomst():
+    bronnen = schoon_bronnen(DEFAULT_BRONNEN)
+    assert herkomst({"bron": "https://www.brendakookt.nl/recepten/chili-sin-carne/"}, bronnen) == {"soort": "bron", "naam": "Brenda Kookt"}
+    assert herkomst({"bron": "https://www.vpro.nl/koken-met-van-boven/artikelen/recept-x"}, bronnen)["naam"] == "Yvette van Boven"
+    assert herkomst({"bron": "https://www.vpro.nl/tegenlicht/x"}, bronnen)["soort"] == "web"
+    assert herkomst({"bron": "https://www.leukerecepten.nl/x"}, bronnen) == {"soort": "web", "naam": "leukerecepten.nl"}
+    assert herkomst({"bron": "Claude (weekmenu okt 2026)"}, bronnen)["soort"] == "ai"
+    assert herkomst({"bron": "AI"}, bronnen)["soort"] == "ai"
+    assert herkomst({"bron": None, "tags": ["pasta", "nieuw"]}, bronnen)["soort"] == "ai"
+    assert herkomst({"bron": None, "tags": ["AGV"]}, bronnen)["soort"] == "onbekend"
+    assert herkomst({"bron": None, "eigen": True}, bronnen)["soort"] == "eigen"
+    assert schoon_bronnen("Jamie | https://www.jamieoliver.com/recipes/\nmob.co.uk") == [
+        {"naam": "Jamie", "domein": "jamieoliver.com", "pad": "/recipes"},
+        {"naam": "mob.co.uk", "domein": "mob.co.uk", "pad": ""}]

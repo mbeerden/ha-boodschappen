@@ -23,6 +23,17 @@ from homeassistant.util import dt as dt_util
 
 from .aanbiedingen import html_naar_tekst, parse_json
 from .api import GrocyError
+from .recept import (  # noqa: F401 - recept_uit_jsonld wordt ook van hieruit gebruikt
+    DEFAULT_BRONNEN,
+    herkomst,
+    kwaliteit,
+    overneem_prompt,
+    recept_uit_jsonld,
+    recept_van_jsonld,
+    schoon_bronnen,
+    verrijk_prompt,
+    verrijk_toepassen,
+)
 from .menu import (
     FEEDBACK,
     ROLLEN,
@@ -51,6 +62,11 @@ UIT_VRIEZER = re.compile(r"(?i)\buit\s+(de\s+)?vriezer\b")
 SYNC_INTERVAL = 60  # agenda hooguit elke minuut teruglezen (leest de lokale kopie van de agenda)
 VERWIJDER_NA = 600  # een maaltijd die 10 minuten uit de agenda weg is, is echt verwijderd
 DAGEN = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
+HEADERS = {  # sommige receptensites weigeren een onbekende client
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml",
+    "Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8",
+}
 
 DEFAULT_INSTELLINGEN: dict[str, Any] = {
     "agenda": None,          # calendar.* entiteit
@@ -59,6 +75,7 @@ DEFAULT_INSTELLINGEN: dict[str, Any] = {
     "personen": [],          # namen voor beoordelingen
     "huisregels": "",        # vrije tekst voor het AI-voorstel (wie kookt wanneer, dieetwensen, ...)
     "ai": None,              # ai_task.* entiteit (leeg = eerste)
+    "bronnen": copy.deepcopy(DEFAULT_BRONNEN),  # de koks/sites waar recepten vandaan mogen komen (zie recept.py)
     **default_menu(),        # profielen, weekdagen, stijl, afwisseling (zie menu.py)
 }
 
@@ -158,26 +175,6 @@ def benodigd(items: list[dict], recepten: dict[str, dict]) -> dict[int, dict]:
     return tot
 
 
-def recept_uit_jsonld(page: str) -> dict | None:
-    """Zoek een schema.org Recipe in de JSON-LD van een webpagina."""
-    for blok in re.findall(r'(?is)<script[^>]+application/ld\+json[^>]*>(.*?)</script>', page):
-        try:
-            data = json.loads(blok.strip())
-        except json.JSONDecodeError:
-            continue
-        stack = [data]
-        while stack:
-            x = stack.pop()
-            if isinstance(x, list):
-                stack.extend(x)
-            elif isinstance(x, dict):
-                t = x.get("@type")
-                if t == "Recipe" or (isinstance(t, list) and "Recipe" in t):
-                    return x
-                stack.extend(v for k, v in x.items() if k in ("@graph", "mainEntity", "itemListElement"))
-    return None
-
-
 def jsonld_naar_tekst(r: dict) -> str:
     """Compacte tekst van een JSON-LD-recept (voor de AI)."""
     def stappen(x: Any) -> list[str]:
@@ -207,22 +204,6 @@ def jsonld_naar_tekst(r: dict) -> str:
         *[f"{n}. {html_naar_tekst(s)}" for n, s in enumerate(stappen(r.get("recipeInstructions")), 1)],
     ]
     return "\n".join(delen)
-
-
-def recept_prompt(bron: str, producten: list[dict]) -> str:
-    return (
-        "Zet dit recept om naar JSON (Nederlands). Antwoord ALLEEN met één JSON-object:\n"
-        '{"naam": str, "porties": int, "tijd": int (totale minuten), "vega": bool, "tags": [str],\n'
-        ' "ingredienten": [{"tekst": "200 g kipfilet", "product_id": int|null, "aantal": number, "basis": bool}],\n'
-        ' "stappen": [str]}\n'
-        "Regels: product_id is het id uit de productlijst hieronder dat je hiervoor in de winkel koopt "
-        "(null als er niets past); aantal is hoeveel verpakkingen/stuks van dat product nodig zijn voor het "
-        "aantal porties van het recept (rond naar boven af, minimaal 1); basis=true voor dingen die altijd in "
-        "huis zijn (zout, peper, olie, water, gedroogde kruiden), die gaan niet op de boodschappenlijst. "
-        "Stappen kort en duidelijk, één handeling per stap.\n\n"
-        f"Producten (id: naam): {json.dumps({p['id']: p['name'] for p in producten}, ensure_ascii=False)}\n\n"
-        f"Recept:\n{bron[:20000]}"
-    )
 
 
 def dagen_tekst(dagen: list[dict]) -> str:
@@ -377,6 +358,8 @@ def schoon_recept(r: dict, bestaand: dict | None = None) -> dict:
         "stappen": stappen,
         "bron": r.get("bron") or (bestaand or {}).get("bron"),
         "mealie_slug": r.get("mealie_slug") or (bestaand or {}).get("mealie_slug"),
+        "eigen": bool(r["eigen"] if "eigen" in r else (bestaand or {}).get("eigen")),
+        "vertaald_uit": r.get("vertaald_uit") or (bestaand or {}).get("vertaald_uit"),
         "notitie": r.get("notitie") or "",
         "bijgewerkt": datetime.now().isoformat(timespec="minutes"),
     })
@@ -407,6 +390,7 @@ class Eten:
             "instellingen": {**copy.deepcopy(DEFAULT_INSTELLINGEN), **(data.get("instellingen") or {})},
         }
         self.s["instellingen"].update(schoon_menu(self.s["instellingen"]))
+        self.s["instellingen"]["bronnen"] = schoon_bronnen(self.s["instellingen"].get("bronnen"))
         if self.s["voorstel"] and self.s["voorstel"].get("versie") != 2:
             self.s["voorstel"] = None  # voorstel in het oude formaat (één gerecht per dag): opnieuw maken
 
@@ -430,7 +414,8 @@ class Eten:
                 laatst[p["recept_id"]] = max(laatst.get(p["recept_id"], ""), p["datum"])
         recepten = []
         for r in sorted(self.s["recepten"].values(), key=lambda x: x["naam"].lower()):
-            recepten.append({**r, "score": gem.get(r["id"]), "laatst": laatst.get(r["id"])})
+            recepten.append({**r, "score": gem.get(r["id"]), "laatst": laatst.get(r["id"]),
+                             "herkomst": herkomst(r, self.inst["bronnen"]), "kwaliteit": kwaliteit(r)})
         return {
             "recepten": recepten,
             "planning": sorted(self.s["planning"], key=lambda p: p["datum"]),
@@ -459,37 +444,54 @@ class Eten:
         self.save()
 
     async def recept_importeren(self, url: str | None, tekst: str | None) -> str:
-        """Recept van een URL (JSON-LD of paginatekst) of uit geplakte tekst, via de AI-taak."""
-        bron = (tekst or "").strip()
+        """Recept van een link of uit geplakte tekst.
+
+        Heeft de pagina een schema.org-recept, dan nemen we ingrediënten en bereiding letterlijk over en koppelt de
+        AI alleen de producten (en vertaalt als het recept niet Nederlands is). Anders haalt de AI het recept uit
+        de tekst, met de opdracht niets weg te laten of te verzinnen.
+        """
+        producten = self._producten()
         if url:
+            url = url.strip()
+            if not url.lower().startswith(("http://", "https://")):
+                raise ValueError("Dat is geen link (begin met https://)")
             session = async_get_clientsession(self.hass)
-            async with session.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0 (HomeAssistant)"}) as resp:
+            async with session.get(url, timeout=30, headers=HEADERS) as resp:
                 if resp.status >= 400:
                     raise ValueError(f"Pagina niet bereikbaar (HTTP {resp.status})")
                 page = await resp.text()
+            pagina_tekst = html_naar_tekst(page)
             ld = recept_uit_jsonld(page)
-            bron = jsonld_naar_tekst(ld) if ld else html_naar_tekst(page)[:20000]
-        if not bron:
-            raise ValueError("Geef een link of plak een recept")
-        res = await self._vraag_ai("Eten: recept omzetten", recept_prompt(bron, self._producten()))
-        if not isinstance(res, dict) or not res.get("naam"):
-            raise ValueError("De AI kon er geen recept van maken")
-        if url:
-            res["bron"] = url
-        return self.recept_opslaan(res)
+            basis = recept_van_jsonld(ld, pagina_tekst) if ld else None
+            if basis and basis["naam"] and basis["ingredienten"] and basis["stappen"]:
+                res = await self._vraag_ai("Eten: recept koppelen", verrijk_prompt(basis, producten))
+                recept = verrijk_toepassen(basis, res)
+            else:
+                recept = await self._vraag_ai("Eten: recept overnemen", overneem_prompt(pagina_tekst, producten))
+                if not isinstance(recept, dict) or not recept.get("naam"):
+                    raise ValueError("Op deze pagina staat geen volledig recept")
+            recept["bron"] = url
+            recept["eigen"] = False
+        else:
+            bron = (tekst or "").strip()
+            if not bron:
+                raise ValueError("Geef een link of plak een recept")
+            recept = await self._vraag_ai("Eten: recept overnemen", overneem_prompt(bron, producten))
+            if not isinstance(recept, dict) or not recept.get("naam"):
+                raise ValueError("De AI kon er geen recept van maken")
+        recept.pop("id", None)
+        return self.recept_opslaan(recept)
 
     async def recept_koppelen(self, rid: str) -> None:
-        """Laat de AI de ingrediënten (opnieuw) aan Grocy-producten koppelen."""
+        """Laat de AI de ingrediënten (opnieuw) aan Grocy-producten koppelen; de tekst van het recept blijft staan."""
         r = self.s["recepten"].get(rid)
         if not r:
             raise ValueError("Recept niet gevonden")
-        bron = "\n".join([f"Naam: {r['naam']}", f"Porties: {r.get('porties')}", "Ingrediënten:",
-                          *[f"- {i['tekst']}" for i in r["ingredienten"]], "Bereiding:",
-                          *[f"{n}. {s}" for n, s in enumerate(r["stappen"], 1)]])
-        res = await self._vraag_ai("Eten: ingrediënten koppelen", recept_prompt(bron, self._producten()))
+        res = await self._vraag_ai("Eten: ingrediënten koppelen", verrijk_prompt(r, self._producten()))
         if not isinstance(res, dict):
             raise ValueError("De AI gaf geen bruikbaar antwoord")
-        nieuw = {**r, "ingredienten": res.get("ingredienten") or r["ingredienten"]}
+        res["taal"] = "nl"  # alleen koppelen: nooit teksten vervangen
+        nieuw = {**r, "ingredienten": verrijk_toepassen(r, res)["ingredienten"]}
         # alleen aanvullen wat nog ontbreekt; de rest van het recept blijft zoals het is
         if "vega" in res and not r.get("vega_gezet"):
             nieuw["vega"] = bool(res["vega"])
@@ -578,6 +580,7 @@ class Eten:
         if not rid and isinstance(x.get("nieuw_recept"), dict) and x["nieuw_recept"].get("naam"):
             concept = schoon_recept({**x["nieuw_recept"], "id": None})
             concept["tags"] = list(dict.fromkeys([*concept["tags"], "nieuw"]))[:8]
+            concept["bron"] = "AI"
         recept = self.s["recepten"].get(rid) if rid else concept
         titel = recept["naam"] if recept else str(x.get("titel") or "").strip()
         if not titel or is_afgewezen(self.s["feedback"], rid, titel):
@@ -763,6 +766,7 @@ class Eten:
         if not rid and isinstance(res.get("nieuw_recept"), dict) and res["nieuw_recept"].get("naam"):
             concept = schoon_recept({**res["nieuw_recept"], "id": None})
             concept["tags"] = list(dict.fromkeys([*concept["tags"], "nieuw"]))[:8]
+            concept["bron"] = "AI"
             rid = concept["id"]
         titel = concept["naam"] if concept else (self.s["recepten"][rid]["naam"] if rid else str(res.get("titel") or "?"))
         kookt = str(res.get("kookt") or "")
@@ -1052,6 +1056,7 @@ class Eten:
             bestaand = {p["naam"]: p for p in self.inst.get("profielen") or []}
             self.inst["profielen"] = [bestaand.get(n, {"naam": n}) for n in self.inst["personen"]]
         self.inst.update(schoon_menu(self.inst))
+        self.inst["bronnen"] = schoon_bronnen(self.inst.get("bronnen"))
         self._sync_ts = 0
         self.save()
 

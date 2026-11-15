@@ -704,8 +704,24 @@ class EtenPanel extends HTMLElement {
         <button class="filt ${this.filter === "top" ? "on" : ""}" data-act="filter" data-f="top">👍 Favoriet</button>
         <button class="filt ${this.filter === "fb:lekker_snel" ? "on" : ""}" data-act="filter" data-f="fb:lekker_snel">⚡ Lekker snel</button>
         <button class="filt ${this.filter === "fb:niet_lekker" ? "on" : ""}" data-act="filter" data-f="fb:niet_lekker">👎 Niet lekker</button>
+        <button class="filt ${this.filter === "bron" ? "on" : ""}" data-act="filter" data-f="bron">✓ Van onze bronnen</button>
+        <button class="filt ${this.filter === "check" ? "on" : ""}" data-act="filter" data-f="check">⚠ Controleren${
+          this.recepten.filter((r) => this._teControleren(r)).length ? ` (${this.recepten.filter((r) => this._teControleren(r)).length})` : ""}</button>
         ${tags.map((t) => `<button class="filt ${this.filter === "tag:" + t ? "on" : ""}" data-act="filter" data-f="tag:${esc(t)}">${esc(t)}</button>`).join("")}
       </div>`;
+  }
+
+  // Een recept is nog te controleren als het door de AI is bedacht, de herkomst onbekend is of er iets aan ontbreekt.
+  _teControleren(r) {
+    const soort = r.herkomst?.soort;
+    return soort === "ai" || soort === "onbekend" || (r.kwaliteit || []).length > 0;
+  }
+
+  _herkomstLabel(r) {
+    const h = r.herkomst;
+    if (!h) return "";
+    const icoon = { bron: "✓", web: "🔗", eigen: "🏠", ai: "🤖", onbekend: "?" }[h.soort] || "";
+    return `<span class="herkomst h-${esc(h.soort)}">${icoon} ${esc(h.naam)}</span>`;
   }
 
   _receptenLijst() {
@@ -720,6 +736,8 @@ class EtenPanel extends HTMLElement {
       lijst = lijst.filter((r) => (r.score && r.score.gem >= 4) || this._fbVan(r.id, r.naam).wel_lekker)
         .sort((a, b) => (b.score?.gem || 4.5) - (a.score?.gem || 4.5));
     if (f.startsWith("fb:")) lijst = lijst.filter((r) => this._fbVan(r.id, r.naam)[f.slice(3)]);
+    if (f === "bron") lijst = lijst.filter((r) => r.herkomst?.soort === "bron");
+    if (f === "check") lijst = lijst.filter((r) => this._teControleren(r));
     if (f.startsWith("tag:")) lijst = lijst.filter((r) => (r.tags || []).includes(f.slice(4)));
     if (!this.recepten.length)
       return `<div class="leeg"><p>Nog geen recepten.</p><p>Tik op + om er een toe te voegen via een link, geplakte tekst of zelf invullen.</p></div>`;
@@ -731,6 +749,7 @@ class EtenPanel extends HTMLElement {
           <span class="t">${esc(r.naam)}</span>
           <span class="rmeta">${meta}${r.score ? `<span class="score" title="Gemiddeld ${fmtNum(r.score.gem)} van 5">${GEZICHT[Math.round(r.score.gem)]} ${fmtNum(r.score.gem)}</span>` : ""}${
             FB.filter((x) => this._fbVan(r.id, r.naam)[x[0]]).map((x) => `<span title="${x[2]}">${x[1]}</span>`).join("")}</span>
+          <span class="rmeta">${this._herkomstLabel(r)}${(r.kwaliteit || []).length ? `<span class="kwal" title="${esc(r.kwaliteit.join("; "))}">⚠ ${esc(r.kwaliteit[0])}${r.kwaliteit.length > 1 ? ` (+${r.kwaliteit.length - 1})` : ""}</span>` : ""}</span>
         </button></li>`;
       })
       .join("")}</ul>`;
@@ -754,6 +773,9 @@ class EtenPanel extends HTMLElement {
       <article class="recept">
         <h2>${esc(r.naam)}</h2>
         <p class="rmeta">${[r.tijd ? `${r.tijd} min` : "", r.vega ? "🌱 vega" : "", ...(r.tags || [])].filter(Boolean).map(esc).join(" · ")}</p>
+        <p class="rmeta">${this._herkomstLabel(r)}${r.bron && /^https?:/i.test(r.bron) ? `<a class="bronlink" href="${esc(r.bron)}" target="_blank" rel="noopener">Origineel recept</a>` : ""}${r.vertaald_uit ? `<span>vertaald</span>` : ""}</p>
+        ${(r.kwaliteit || []).length ? `<div class="kwalblok" role="note"><b>Controleer dit recept</b><ul>${r.kwaliteit.map((k) => `<li>${esc(k)}</li>`).join("")}</ul></div>` : ""}
+        ${r.herkomst?.soort === "ai" ? `<p class="hint">Dit recept is door de AI bedacht en komt niet van een van jullie bronnen.</p>` : ""}
         ${sc ? `<p class="scores">${Object.entries(sc.personen).map(([p, s]) => `<span>${esc(p)} ${GEZICHT[Math.round(s)]}</span>`).join("")}<small>${sc.keer}× gegeten</small></p>` : ""}
         <div class="fbrij">${this._fbKnoppen(r.id, r.naam, undefined, true)}</div>
         <div class="knoppen">
@@ -775,7 +797,6 @@ class EtenPanel extends HTMLElement {
         <h3>Bereiding</h3>
         <ol class="stappen">${(r.stappen || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
         ${r.notitie ? `<p class="notitie">${esc(r.notitie)}</p>` : ""}
-        ${r.bron ? `<p class="bron"><a href="${esc(r.bron)}" target="_blank" rel="noopener">Originele bron</a></p>` : ""}
       </article>`;
   }
 
@@ -833,6 +854,7 @@ class EtenPanel extends HTMLElement {
         <label class="veld"><span>Eén stap per regel</span><textarea name="stappen" rows="8">${esc((r.stappen || []).join("\n"))}</textarea></label>
         <label class="veld"><span>Notitie</span><textarea name="notitie" rows="2">${esc(r.notitie || "")}</textarea></label>
         <label class="veld"><span>Bron (link)</span><input name="bron" value="${esc(r.bron || "")}"></label>
+        <label class="check"><input type="checkbox" name="eigen" ${r.eigen ? "checked" : ""}> Eigen recept (van onszelf, hoeft niet van een bron te komen)</label>
         <div class="knoppen">
           ${id ? `<button class="wis" data-act="receptweg" data-id="${id}">Verwijderen</button>` : ""}
           ${id ? `<button class="sec-btn" data-act="koppel" data-id="${id}" title="Laat de AI de ingrediënten aan Grocy-producten koppelen">Automatisch koppelen</button>` : ""}
@@ -859,7 +881,8 @@ class EtenPanel extends HTMLElement {
         <h3>Zelf invullen</h3>
         <button class="sec-btn" data-act="handmatig">Leeg recept</button>
       </section>
-      <p class="hint">Ophalen en omzetten gaat via de AI-taak en koppelt de ingrediënten aan je Grocy-producten. Controleer het resultaat daarna even.</p>`;
+      <p class="hint">Van een website nemen we ingrediënten en bereiding letterlijk over; de AI-taak koppelt alleen de ingrediënten aan je Grocy-producten en vertaalt als het recept niet Nederlands is. Ontbreekt er iets, dan zie je dat bij het recept.</p>
+      <p class="hint">Jullie bronnen: ${(this.d.instellingen.bronnen || []).map((b) => `<a href="https://${esc(b.domein + (b.pad || ""))}" target="_blank" rel="noopener">${esc(b.naam)}</a>`).join(" · ") || "nog geen (zie instellingen)"}</p>`;
   }
 
   _instView() {
@@ -944,6 +967,11 @@ class EtenPanel extends HTMLElement {
         <h3>Overige afspraken</h3>
         <label class="veld"><span>Vrije tekst voor uitzonderingen</span>
           <textarea data-pad="huisregels" rows="4">${esc(e.huisregels || "")}</textarea></label>
+
+        <h3>Bronnen voor recepten</h3>
+        <p class="hint">De koks en sites waar jullie recepten vandaan moeten komen. Eén per regel: naam | adres van de site (eventueel met pad).</p>
+        <label class="veld"><span>Bronnen</span>
+          <textarea data-pad="bronnen_tekst" rows="5">${esc(e.bronnen_tekst ?? (e.bronnen || []).map((b) => `${b.naam} | ${b.domein}${b.pad || ""}`).join("\n"))}</textarea></label>
 
         <h3>Agenda en AI</h3>
         <label class="veld"><span>Agenda voor de maaltijden</span>
@@ -1334,6 +1362,7 @@ class EtenPanel extends HTMLElement {
           stappen: v("stappen").value.split("\n").map((x) => x.trim()).filter(Boolean),
           notitie: v("notitie").value.trim(),
           bron: v("bron").value.trim() || null,
+          eigen: v("eigen").checked,
         };
         if (!recept.naam) {
           this.err = "Geef het recept een naam.";
@@ -1392,7 +1421,8 @@ class EtenPanel extends HTMLElement {
         e.profielen = (e.profielen || []).filter((p) => (p.naam || "").trim());
         await this._do({ type: "boodschappen/eten_instellingen", instellingen: {
           agenda: e.agenda || null, tijd: e.tijd || "17:00", duur: Number(e.duur || 60), huisregels: e.huisregels || "",
-          ai: e.ai || null, profielen: e.profielen, weekdagen: e.weekdagen, stijl: e.stijl, afwisseling: e.afwisseling } });
+          ai: e.ai || null, profielen: e.profielen, weekdagen: e.weekdagen, stijl: e.stijl, afwisseling: e.afwisseling,
+          bronnen: e.bronnen_tekst !== undefined ? e.bronnen_tekst : e.bronnen } });
         if (!this.err) {
           this.inst = null;
           this.view = null;
@@ -1565,6 +1595,13 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; flex: 1; }
   background: var(--card-background-color); box-shadow: 0 0 0 1px var(--rand) inset; min-height: 56px; }
 .rmeta { color: var(--secondary-text-color); font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .score { font-weight: 600; color: var(--primary-text-color); }
+.herkomst { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--zacht); color: var(--primary-text-color); white-space: nowrap; }
+.herkomst.h-bron { background: color-mix(in srgb, var(--success-color, #2e7d32) 18%, transparent); }
+.herkomst.h-ai, .herkomst.h-onbekend { background: color-mix(in srgb, var(--warning-color, #f9a825) 22%, transparent); }
+.kwal { color: var(--warning-color, #b26a00); font-size: 12px; }
+.kwalblok { border-left: 4px solid var(--warning-color, #f9a825); background: var(--zacht); padding: 8px 12px; border-radius: 8px; margin: 8px 0; font-size: 14px; }
+.kwalblok ul { margin: 4px 0 0; padding-left: 18px; }
+.bronlink { color: var(--primary-color); }
 .terug { padding: 8px 4px; color: var(--primary-color); font-size: 15px; }
 .recept h2, .kop2 { font-size: 24px; font-weight: 500; margin: 6px 0 4px; line-height: 1.2; }
 .recept h3, .bewerk h3, .kaart h3 { font-size: 16px; margin: 20px 0 8px; }
