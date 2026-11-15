@@ -26,6 +26,7 @@ from .api import GrocyError
 from .recept import (  # noqa: F401 - recept_uit_jsonld wordt ook van hieruit gebruikt
     DEFAULT_BRONNEN,
     herkomst,
+    is_vreemde_taal,
     kwaliteit,
     overneem_prompt,
     recept_uit_jsonld,
@@ -464,8 +465,14 @@ class Eten:
             ld = recept_uit_jsonld(page)
             basis = recept_van_jsonld(ld, pagina_tekst) if ld else None
             if basis and basis["naam"] and basis["ingredienten"] and basis["stappen"]:
-                res = await self._vraag_ai("Eten: recept koppelen", verrijk_prompt(basis, producten))
-                recept = verrijk_toepassen(basis, res)
+                vreemd = is_vreemde_taal(basis)
+                for _poging in range(2 if vreemd else 1):
+                    res = await self._vraag_ai("Eten: recept koppelen", verrijk_prompt(basis, producten, vertalen=vreemd))
+                    recept = verrijk_toepassen(basis, res, vertaald=True if vreemd else None)
+                    if not vreemd or recept.get("vertaald_uit"):
+                        break
+                if vreemd and not recept.get("vertaald_uit"):
+                    recept["notitie"] = "Niet vertaald: de vertaling was onvolledig, dus dit is de tekst van de bron."
             else:
                 recept = await self._vraag_ai("Eten: recept overnemen", overneem_prompt(pagina_tekst, producten))
                 if not isinstance(recept, dict) or not recept.get("naam"):
@@ -490,8 +497,7 @@ class Eten:
         res = await self._vraag_ai("Eten: ingrediënten koppelen", verrijk_prompt(r, self._producten()))
         if not isinstance(res, dict):
             raise ValueError("De AI gaf geen bruikbaar antwoord")
-        res["taal"] = "nl"  # alleen koppelen: nooit teksten vervangen
-        nieuw = {**r, "ingredienten": verrijk_toepassen(r, res)["ingredienten"]}
+        nieuw = {**r, "ingredienten": verrijk_toepassen(r, res, vertaald=False)["ingredienten"]}
         # alleen aanvullen wat nog ontbreekt; de rest van het recept blijft zoals het is
         if "vega" in res and not r.get("vega_gezet"):
             nieuw["vega"] = bool(res["vega"])

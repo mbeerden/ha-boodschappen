@@ -137,16 +137,30 @@ def recept_van_jsonld(ld: dict, pagina_tekst: str = "") -> dict:
         "naam": _schoon(ld.get("name")),
         "porties": porties,
         "tijd": tijd,
-        "ingredienten": [t for t in (_schoon(i) for i in ld.get("recipeIngredient") or []) if t],
+        "ingredienten": [t for t in (re.sub(r"^[\s•▢▪◦·*–-]+", "", _schoon(i)) for i in ld.get("recipeIngredient") or []) if t],
         "stappen": _stappen(ld.get("recipeInstructions")),
         "auteur": _schoon(auteur) or None,
     }
 
 
+NL_WOORDEN = {"de", "het", "een", "en", "met", "tot", "voeg", "minuten", "van", "op", "snijd", "snij", "doe", "bak", "in", "erbij"}
+EN_WOORDEN = {"the", "and", "with", "until", "into", "then", "add", "minutes", "of", "to", "for", "cut", "heat", "stir", "a"}
+
+
+def is_vreemde_taal(recept: dict) -> bool:
+    """Is de bereiding duidelijk niet Nederlands? (ruwe telling van veelgebruikte woorden)"""
+    woorden = re.findall(r"[a-z]+", " ".join(recept.get("stappen") or []).lower())
+    nl = sum(w in NL_WOORDEN for w in woorden)
+    en = sum(w in EN_WOORDEN for w in woorden)
+    return en > nl and en >= 5
+
+
 # ----------------------------------------------------------------- de AI: alleen koppelen en vertalen
-def verrijk_prompt(recept: dict, producten: list[dict]) -> str:
+def verrijk_prompt(recept: dict, producten: list[dict], vertalen: bool = False) -> str:
     """Vraag de AI om bij een letterlijk overgenomen recept de producten te koppelen (en zo nodig te vertalen)."""
     return (
+        ("LET OP: dit recept is NIET Nederlands. Vertaal het volledig (punt 2): geef bij elk ingrediënt de Nederlandse "
+         "'tekst' en geef alle stappen in het Nederlands, in precies hetzelfde aantal.\n" if vertalen else "") +
         "Hieronder staat een recept van een kok. Je mag er NIETS aan veranderen: geen ingrediënt of stap weglaten, "
         "niets toevoegen, niets samenvatten. Je doet alleen dit:\n"
         "1. Per ingrediënt (zelfde aantal, zelfde volgorde): product_id = het id uit de productlijst dat je ervoor in de "
@@ -174,7 +188,7 @@ def _teksten(recept: dict) -> list[str]:
     return [i["tekst"] if isinstance(i, dict) else str(i) for i in recept.get("ingredienten") or []]
 
 
-def verrijk_toepassen(recept: dict, res: Any) -> dict:
+def verrijk_toepassen(recept: dict, res: Any, vertaald: bool | None = None) -> dict:
     """Voeg het antwoord van de AI samen met het bronrecept; de tekst van de bron wint altijd.
 
     Alleen bij een recept in een andere taal nemen we de vertaling over, en alleen als die even veel regels heeft.
@@ -184,7 +198,8 @@ def verrijk_toepassen(recept: dict, res: Any) -> dict:
     origineel = _teksten(recept)
     oud = [i if isinstance(i, dict) else {} for i in recept.get("ingredienten") or []]
     ai_ing = [i for i in (res.get("ingredienten") or []) if isinstance(i, dict)]
-    vertaald = str(res.get("taal") or "nl").lower()[:2] != "nl"
+    if vertaald is None:
+        vertaald = str(res.get("taal") or "nl").lower()[:2] != "nl"
     gelijk = len(ai_ing) == len(origineel)
 
     ingredienten = []
@@ -200,7 +215,8 @@ def verrijk_toepassen(recept: dict, res: Any) -> dict:
 
     stappen = list(recept.get("stappen") or [])
     ai_st = [str(s).strip() for s in (res.get("stappen") or []) if str(s).strip()]
-    if vertaald and stappen and len(ai_st) == len(stappen):
+    stappen_vertaald = bool(vertaald and stappen and len(ai_st) == len(stappen))
+    if stappen_vertaald:
         stappen = ai_st
 
     uit = {**recept, "ingredienten": ingredienten, "stappen": stappen}
@@ -212,8 +228,9 @@ def verrijk_toepassen(recept: dict, res: Any) -> dict:
     for veld in ("porties", "tijd"):
         if not uit.get(veld) and res.get(veld):
             uit[veld] = res[veld]
-    if vertaald:
-        uit["vertaald_uit"] = str(res.get("taal"))[:5]
+    if stappen_vertaald and gelijk and all(str(a.get("tekst") or "").strip() for a in ai_ing):
+        taal = str(res.get("taal") or "").lower()[:5]
+        uit["vertaald_uit"] = taal if taal and taal[:2] != "nl" else "en"
     return uit
 
 
@@ -244,21 +261,48 @@ def _norm(s: Any) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-zà-ÿ0-9 ]", " ", str(s or "").lower())).strip()
 
 
+OPTIONEEL = re.compile(r"(?i)optioneel|eventueel|\bevt\b|naar smaak|naar wens|garner|erbij|om te serveren|voor erbij")
+
+
+def _kort(s: str) -> str:
+    """Dubbele klinkers enkel, zodat 'tomaat' en 'tomaten' op elkaar lijken."""
+    return re.sub(r"([aeou])\1", r"\1", s)
+
+
+def _stam(w: str) -> str:
+    """Grove stam: meervoud en verkleinwoord eraf ('uien' -> 'ui', 'tomaatjes' -> 'tomat')."""
+    for eind in ("jes", "en", "s"):
+        if w.endswith(eind) and len(w) - len(eind) >= 2:
+            w = w[: -len(eind)]
+            break
+    return _kort(w)
+
+
 def _kernwoorden(tekst: str) -> list[str]:
     """De woorden waaraan je een ingrediënt in de bereiding herkent (zonder hoeveelheid, eenheid, toelichting)."""
     tekst = re.sub(r"\([^)]*\)", " ", tekst.split(",")[0])
-    return [w for w in _norm(tekst).split() if len(w) >= 4 and not w.isdigit() and w not in EENHEDEN]
+    return [w for w in _norm(tekst).split() if len(w) >= 3 and not w.isdigit() and w not in EENHEDEN]
+
+
+def _komt_voor(woord: str, stappen: str, stapwoorden: set[str]) -> bool:
+    """Staat dit woord in de bereiding? Ook als meervoud, verkleinwoord of deel van een samenstelling."""
+    woord = _kort(woord)
+    if _stam(woord) in stappen or (len(woord) >= 5 and woord[:4] in stappen):
+        return True
+    # samenstelling: 'kastanjechampignons' is genoemd als de bereiding 'champignons' zegt
+    return any(len(s) >= 5 and s in woord for s in stapwoorden)
 
 
 def niet_in_bereiding(recept: dict) -> list[str]:
-    """Ingrediënten die nergens in de stappen terugkomen."""
-    stappen = _norm(" ".join(recept.get("stappen") or []))
+    """Ingrediënten die nergens in de stappen terugkomen (optionele en garnering tellen niet mee)."""
+    stappen = _kort(_norm(" ".join(recept.get("stappen") or [])))
+    stapwoorden = {_stam(w) for w in stappen.split()}
     uit = []
     for tekst in _teksten(recept):
-        if STIL.search(tekst):
+        if STIL.search(tekst) or OPTIONEEL.search(tekst):
             continue
         woorden = _kernwoorden(tekst)
-        if woorden and not any(w[:5] in stappen for w in woorden):
+        if woorden and not any(_komt_voor(w, stappen, stapwoorden) for w in woorden):
             uit.append(tekst)
     return uit
 

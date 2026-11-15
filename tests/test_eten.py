@@ -207,6 +207,7 @@ def test_voorstel_prompt_en_controle():
 from custom_components.boodschappen.recept import (  # noqa: E402
     DEFAULT_BRONNEN,
     duur_minuten,
+    is_vreemde_taal,
     herkomst,
     kwaliteit,
     laad_json_soepel,
@@ -304,3 +305,26 @@ def test_bronnen_en_herkomst():
     assert schoon_bronnen("Jamie | https://www.jamieoliver.com/recipes/\nmob.co.uk") == [
         {"naam": "Jamie", "domein": "jamieoliver.com", "pad": "/recipes"},
         {"naam": "mob.co.uk", "domein": "mob.co.uk", "pad": ""}]
+
+
+def test_bereiding_herkent_meervoud_en_samenstellingen():
+    r = {"ingredienten": [{"tekst": t} for t in (
+        "2 uien", "500 g kastanjechampignons", "1 groentebouillonblokje", "400-500 g rundergehakt", "3 paprika's",
+        "250 g snacktomaten", "1 zak nacho chips", "Mosterd (optioneel)", "verse basilicum om te garneren", "2 preserved lemons")],
+        "stappen": ["Snipper de ui en bak de champignons.", "Voeg het bouillonblokje en het gehakt toe.",
+                    "Snijd de paprika en de tomaatjes."]}
+    assert niet_in_bereiding(r) == ["1 zak nacho chips", "2 preserved lemons"]
+
+
+def test_vreemde_taal_en_opsommingstekens():
+    en = {"stappen": ["Preheat the oven to 200°C.", "Cut the courgettes into rounds and add the oil, then roast for 15 minutes."]}
+    nl = {"stappen": ["Snipper de ui en fruit in de olie.", "Voeg de linzen toe en laat 10 minuten sudderen met de tomaten."]}
+    assert is_vreemde_taal(en) and not is_vreemde_taal(nl) and not is_vreemde_taal({"stappen": []})
+    ld = {"@type": "Recipe", "name": "X", "recipeIngredient": ["• 1 grote ui", "▢ 2 el olie", "zout"], "recipeInstructions": "Bak."}
+    assert recept_van_jsonld(ld)["ingredienten"] == ["1 grote ui", "2 el olie", "zout"]
+    # onvolledige vertaling: de brontekst blijft staan en het recept telt niet als vertaald
+    basis = {"naam": "Soup", "ingredienten": ["1 onion", "salt"], "stappen": ["Fry.", "Season."]}
+    r = verrijk_toepassen(basis, {"taal": "nl", "ingredienten": [{"tekst": "1 ui"}, {"tekst": "zout"}]}, vertaald=True)
+    assert r["stappen"] == ["Fry.", "Season."] and not r.get("vertaald_uit")
+    r = verrijk_toepassen(basis, {"ingredienten": [{"tekst": "1 ui"}, {"tekst": "zout"}], "stappen": ["Bak.", "Kruid."]}, vertaald=True)
+    assert r["stappen"] == ["Bak.", "Kruid."] and r["vertaald_uit"] == "en"
