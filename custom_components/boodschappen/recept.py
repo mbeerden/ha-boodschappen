@@ -14,12 +14,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 # De bronnen waaruit het gezin recepten wil hebben. 'pad' beperkt een bron tot een deel van een site.
-DEFAULT_BRONNEN: list[dict[str, str]] = [
-    {"naam": "Ottolenghi", "domein": "ottolenghi.co.uk", "pad": ""},
-    {"naam": "Yvette van Boven", "domein": "vpro.nl", "pad": "/koken-met-van-boven"},
-    {"naam": "Uit Paulines Keuken", "domein": "uitpaulineskeuken.nl", "pad": ""},
-    {"naam": "Brenda Kookt", "domein": "brendakookt.nl", "pad": ""},
+DEFAULT_BRONNEN: list[dict[str, Any]] = [
+    {"naam": "Ottolenghi", "domein": "ottolenghi.co.uk", "pad": "/pages/recipes", "type": "website", "aan": True, "notitie": ""},
+    {"naam": "Yvette van Boven", "domein": "vpro.nl", "pad": "/koken-met-van-boven", "type": "website", "aan": True, "notitie": ""},
+    {"naam": "Uit Paulines Keuken", "domein": "uitpaulineskeuken.nl", "pad": "", "type": "website", "aan": True, "notitie": ""},
+    {"naam": "Brenda Kookt", "domein": "brendakookt.nl", "pad": "", "type": "website", "aan": True, "notitie": ""},
 ]
+BRON_TYPES = ("website", "boek", "anders")
 
 # Smaakmakers: kruiden, specerijen, zout/bouillon, zuur en kant-en-klare smaakbasis.
 SMAAK = re.compile(
@@ -333,10 +334,15 @@ def kwaliteit(recept: dict) -> list[str]:
 
 # ----------------------------------------------------------------- herkomst
 def schoon_bronnen(v: Any) -> list[dict]:
-    """Bronnenlijst in vaste vorm; accepteert ook regels 'Naam | domein/pad'."""
+    """Bronnenlijst in vaste vorm; accepteert ook regels 'Naam | domein/pad'.
+
+    Een bron heeft een naam en een type: website (met domein en eventueel pad), boek of anders (zonder adres).
+    `aan` = False laat de bron staan voor de herkomst van bestaande recepten, maar slaat hem over bij Ontdek.
+    """
     if isinstance(v, str):
         v = [r for r in v.splitlines() if r.strip()]
-    uit = []
+    uit: list[dict] = []
+    gezien: set[str] = set()
     for b in v or []:
         if isinstance(b, str):
             naam, _, adres = b.partition("|")
@@ -349,8 +355,17 @@ def schoon_bronnen(v: Any) -> list[dict]:
         domein, _, pad = adres.partition("/")
         domein = re.sub(r"(?i)^www\.", "", domein).lower()
         pad = str(b.get("pad") or (f"/{pad}" if pad else "")).rstrip("/")
-        if domein:
-            uit.append({"naam": str(b.get("naam") or "").strip() or domein, "domein": domein, "pad": pad})
+        naam = str(b.get("naam") or "").strip() or domein
+        soort = str(b.get("type") or "").lower()
+        if soort not in BRON_TYPES:
+            soort = "website" if domein else "boek"
+        if soort != "website":
+            domein, pad = "", ""
+        if not naam or (soort == "website" and not domein) or naam.lower() in gezien:
+            continue
+        gezien.add(naam.lower())
+        uit.append({"naam": naam, "domein": domein, "pad": pad, "type": soort,
+                    "aan": bool(b["aan"]) if "aan" in b else True, "notitie": str(b.get("notitie") or "").strip()})
     return uit
 
 
@@ -375,6 +390,11 @@ def herkomst(recept: dict, bronnen: list[dict]) -> dict:
     bron = str(recept.get("bron") or "").strip()
     if recept.get("eigen"):
         return {"soort": "eigen", "naam": "Eigen recept"}
+    gekozen = str(recept.get("bron_naam") or "").strip().lower()
+    if gekozen:
+        for b in bronnen:
+            if b["naam"].lower() == gekozen:
+                return {"soort": "bron", "naam": b["naam"]}
     if bron.lower().startswith("http"):
         b = bron_van(bron, bronnen)
         if b:
@@ -385,3 +405,111 @@ def herkomst(recept: dict, bronnen: list[dict]) -> dict:
     if bron:
         return {"soort": "eigen", "naam": bron}
     return {"soort": "onbekend", "naam": "Herkomst onbekend"}
+
+
+# ----------------------------------------------------------------- aanpassen met de AI
+def aanpas_prompt(recept: dict, wens: str, producten: list[dict], context: str, correctie: str = "") -> str:
+    """Vraag de AI een bestaand recept aan te passen op een wens, en het volledige resultaat terug te geven."""
+    return (
+        "Je past een bestaand recept aan op een wens van het gezin. Antwoord ALLEEN met één JSON-object:\n"
+        '{"naam": str, "porties": int, "tijd": int (totale minuten), "vega": bool, "tags": [str],\n'
+        ' "ingredienten": [{"tekst": str, "product_id": int|null, "aantal": number, "basis": bool}],\n'
+        ' "stappen": [str], "wijzigingen": [str]}\n'
+        "Regels:\n"
+        "- Voer de wens uit en laat de rest van het recept zoals het is: naam, opbouw en smaak blijven herkenbaar. "
+        "Verander niets wat niet bij de wens hoort.\n"
+        "- Geef het VOLLEDIGE aangepaste recept: alle ingrediënten (met hoeveelheden) en alle stappen, ook wat niet "
+        "verandert. Niet samenvatten, niets weglaten.\n"
+        "- De bereiding moet compleet en uitvoerbaar zijn: één handeling per stap, met tijden, temperaturen en de "
+        "kruiden of andere smaakmakers op de plek waar ze erbij horen. Vervang je iets (bijv. kip door tofu), voeg dan "
+        "ook toe wat daarbij hoort (marinade, kruiden) en pas bereidingstijden aan.\n"
+        "- Hoeveelheden kloppen met het aantal porties. Vraagt de wens een ander aantal porties, schaal dan alles.\n"
+        "- Houd rekening met het gezin hieronder: allergieën nooit gebruiken, en wat ze niet eten vermijden.\n"
+        "- Is de wens niet goed uitvoerbaar, geef dan toch je beste poging en begin 'wijzigingen' met een korte "
+        "waarschuwing.\n"
+        "- wijzigingen: 2 tot 6 korte Nederlandse zinnen over wat je veranderd hebt.\n"
+        "- naam: houd de naam, tenzij de wens het gerecht echt anders maakt (bijv. 'vega' of 'met kip'); "
+        "dan een korte passende naam.\n"
+        "- product_id = het id uit de productlijst dat je ervoor in de winkel koopt (null als er niets past); aantal = "
+        "verpakkingen/stuks voor de porties van het recept (naar boven afronden, minimaal 1); basis=true voor wat "
+        "altijd in huis is (zout, peper, olie, water, gedroogde kruiden).\n\n"
+        + (f"LET OP, correctie op je vorige antwoord: {correctie}\n\n" if correctie else "")
+        + f"{context}\n\n"
+        f"Wens: {wens}\n\n"
+        f"Huidig recept:\nNaam: {recept.get('naam')}\nPorties: {recept.get('porties') or '?'}\nTijd: {recept.get('tijd') or '?'}\n"
+        "Ingrediënten:\n" + "\n".join(f"{n}. {t}" for n, t in enumerate(_teksten(recept), 1))
+        + "\nBereiding:\n" + "\n".join(f"{n}. {s}" for n, s in enumerate(recept.get("stappen") or [], 1))
+        + f"\n\nProducten (id: naam): {json.dumps({p['id']: p['name'] for p in producten}, ensure_ascii=False)}"
+    )
+
+
+def aanpassing_samenvoegen(oud: dict, res: Any) -> dict:
+    """Antwoord van de AI omzetten naar een recept; wat onveranderd is houdt zijn koppeling aan het Grocy-product.
+
+    Geeft een ValueError als het antwoord geen bruikbaar recept is (liever een fout dan een half recept bewaren).
+    """
+    if not isinstance(res, dict):
+        raise ValueError("Gemini gaf geen bruikbaar recept terug")
+    ingr_oud = {_norm(i["tekst"]): i for i in oud.get("ingredienten") or [] if isinstance(i, dict) and i.get("tekst")}
+    ingredienten = []
+    for i in res.get("ingredienten") or []:
+        if isinstance(i, str):
+            i = {"tekst": i}
+        if not isinstance(i, dict) or not str(i.get("tekst") or "").strip():
+            continue
+        tekst = str(i["tekst"]).strip()
+        vorig = ingr_oud.get(_norm(tekst))
+        if vorig:  # ongewijzigde regel: koppeling en aantal van het origineel behouden
+            ingredienten.append({"tekst": tekst, "product_id": vorig.get("product_id"), "aantal": vorig.get("aantal") or 1,
+                                 "basis": bool(vorig.get("basis"))})
+        else:
+            ingredienten.append({"tekst": tekst, "product_id": i.get("product_id"), "aantal": i.get("aantal") or 1,
+                                 "basis": bool(i.get("basis"))})
+    stappen = [str(s).strip() for s in res.get("stappen") or [] if str(s).strip()]
+    if len(ingredienten) < 2 or not stappen:
+        raise ValueError("Gemini gaf geen volledig recept terug (ingrediënten of bereiding ontbreken). Probeer het opnieuw.")
+    wijz = [str(w).strip() for w in res.get("wijzigingen") or [] if str(w).strip()][:8]
+    return {
+        "naam": str(res.get("naam") or oud.get("naam") or "").strip() or oud.get("naam") or "Naamloos",
+        "porties": res.get("porties") or oud.get("porties"),
+        "tijd": res.get("tijd") or oud.get("tijd"),
+        "vega": bool(res["vega"]) if "vega" in res else bool(oud.get("vega")),
+        "tags": [str(t).strip() for t in res.get("tags") or oud.get("tags") or [] if str(t).strip()][:6],
+        "ingredienten": ingredienten,
+        "stappen": stappen,
+        "wijzigingen": wijz,
+    }
+
+
+def recept_verschil(oud: dict, nieuw: dict) -> dict:
+    """Wat er verandert tussen twee versies van een recept, om te tonen voordat je kiest.
+
+    ingredienten: erbij, weg en gewijzigd (zelfde hoofdingrediënt, andere regel); stappen: per nieuwe stap of die nieuw is.
+    """
+    def sleutel(t: str) -> str:
+        return _norm(t)
+
+    oude = [i["tekst"] for i in oud.get("ingredienten") or [] if isinstance(i, dict) and i.get("tekst")]
+    nieuwe = [i["tekst"] for i in nieuw.get("ingredienten") or [] if isinstance(i, dict) and i.get("tekst")]
+    oude_s, nieuwe_s = {sleutel(t) for t in oude}, {sleutel(t) for t in nieuwe}
+    weg = [t for t in oude if sleutel(t) not in nieuwe_s]
+    erbij = [t for t in nieuwe if sleutel(t) not in oude_s]
+    gewijzigd: list[dict] = []
+    for t in list(weg):
+        kern = _kernwoorden(t)
+        if not kern:
+            continue
+        for u in erbij:
+            if kern[0] in _kernwoorden(u)[:2] or (_kernwoorden(u) and _kernwoorden(u)[0] == kern[0]):
+                gewijzigd.append({"van": t, "naar": u})
+                weg.remove(t)
+                erbij.remove(u)
+                break
+    oude_stappen = {sleutel(s) for s in oud.get("stappen") or []}
+    return {
+        "naam": [oud.get("naam"), nieuw.get("naam")] if sleutel(oud.get("naam") or "") != sleutel(nieuw.get("naam") or "") else None,
+        "porties": [oud.get("porties"), nieuw.get("porties")] if oud.get("porties") != nieuw.get("porties") else None,
+        "tijd": [oud.get("tijd"), nieuw.get("tijd")] if oud.get("tijd") != nieuw.get("tijd") else None,
+        "ingredienten": {"erbij": erbij, "weg": weg, "gewijzigd": gewijzigd},
+        "stappen_nieuw": [sleutel(s) not in oude_stappen for s in nieuw.get("stappen") or []],
+    }

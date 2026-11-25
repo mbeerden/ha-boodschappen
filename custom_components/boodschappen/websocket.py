@@ -288,7 +288,39 @@ async def _e_recept_weg(e, msg):
 
 
 async def _e_import(e, msg):
-    return await e.recept_importeren(msg.get("url"), msg.get("tekst"))
+    return await e.recept_importeren(msg.get("url"), msg.get("tekst"), msg.get("fotos"), msg.get("bron_naam"))
+
+
+async def _e_aanpassen(e, msg):
+    await e.recept_aanpassen(msg["recept_id"], msg.get("wens") or "")
+
+
+async def _e_aanpassing_toepassen(e, msg):
+    return e.aanpassing_toepassen(msg["recept_id"], msg["modus"])
+
+
+async def _e_aanpassing_weg(e, msg):
+    e.aanpassing_weg(msg["recept_id"])
+
+
+async def _e_aanpassing_ongedaan(e, msg):
+    e.aanpassing_ongedaan(msg["recept_id"])
+
+
+async def _e_bronnen(e, msg):
+    e.bronnen_opslaan(msg["bronnen"])
+
+
+async def _e_recept_bron(e, msg):
+    e.recept_bron_zetten(msg["recept_id"], msg.get("bron_naam"), bool(msg.get("eigen")))
+
+
+async def _e_bron_check(e, msg):
+    return await e.bron_controleren(msg["url"])
+
+
+async def _e_bron_zoek(e, msg):
+    return await e.bron_zoeken(msg.get("bron"), msg.get("vraag") or "", bool(msg.get("ai")))
 
 
 async def _e_koppel(e, msg):
@@ -387,7 +419,20 @@ ETEN_COMMANDS = [
     ({vol.Required("type"): "boodschappen/eten_recept", vol.Required("recept"): dict}, _e_recept, False),
     ({vol.Required("type"): "boodschappen/eten_recept_weg", vol.Required("recept_id"): str}, _e_recept_weg, False),
     ({vol.Required("type"): "boodschappen/eten_import", vol.Optional("url"): vol.Any(None, str),
-      vol.Optional("tekst"): vol.Any(None, str)}, _e_import, False),
+      vol.Optional("tekst"): vol.Any(None, str), vol.Optional("fotos"): vol.Any(None, [str]),
+      vol.Optional("bron_naam"): vol.Any(None, str)}, _e_import, False),
+    ({vol.Required("type"): "boodschappen/eten_aanpassen", vol.Required("recept_id"): str,
+      vol.Optional("wens"): vol.Any(None, str)}, _e_aanpassen, False),
+    ({vol.Required("type"): "boodschappen/eten_aanpassing_toepassen", vol.Required("recept_id"): str,
+      vol.Required("modus"): vol.In(["variant", "vervang"])}, _e_aanpassing_toepassen, False),
+    ({vol.Required("type"): "boodschappen/eten_aanpassing_weg", vol.Required("recept_id"): str}, _e_aanpassing_weg, False),
+    ({vol.Required("type"): "boodschappen/eten_aanpassing_ongedaan", vol.Required("recept_id"): str}, _e_aanpassing_ongedaan, False),
+    ({vol.Required("type"): "boodschappen/eten_bronnen", vol.Required("bronnen"): [dict]}, _e_bronnen, False),
+    ({vol.Required("type"): "boodschappen/eten_recept_bron", vol.Required("recept_id"): str,
+      vol.Optional("bron_naam"): vol.Any(None, str), vol.Optional("eigen"): bool}, _e_recept_bron, False),
+    ({vol.Required("type"): "boodschappen/eten_bron_check", vol.Required("url"): str}, _e_bron_check, False),
+    ({vol.Required("type"): "boodschappen/eten_bron_zoek", vol.Optional("bron"): vol.Any(None, str),
+      vol.Optional("vraag"): vol.Any(None, str), vol.Optional("ai"): bool}, _e_bron_zoek, False),
     ({vol.Required("type"): "boodschappen/eten_koppel", vol.Required("recept_id"): str}, _e_koppel, False),
     ({vol.Required("type"): "boodschappen/eten_voorstel", vol.Required("dagen"): [dict],
       vol.Optional("wens"): vol.Any(None, str)}, _e_voorstel, False),

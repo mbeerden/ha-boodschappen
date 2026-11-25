@@ -7,6 +7,7 @@ Verschuift of verwijdert iemand zo'n event in de agenda, dan neemt de planning d
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 from datetime import date, datetime, timedelta
 import json
@@ -16,21 +17,44 @@ import re
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
+import aiohttp
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .aanbiedingen import html_naar_tekst, parse_json
 from .api import GrocyError
+from .bronnen import (
+    SITEMAP_PADEN,
+    bron_advies,
+    foto_prompt,
+    is_sitemap_index,
+    kandidaten_voor_ai,
+    kies_prompt,
+    kies_toepassen,
+    receptlink_mogelijk,
+    sitemap_locs,
+    sitemap_volgorde,
+    sitemaps_uit_robots,
+    site_naam,
+    titel_uit_url,
+    url_sleutel,
+    zoek_links,
+)
 from .recept import (  # noqa: F401 - recept_uit_jsonld wordt ook van hieruit gebruikt
     DEFAULT_BRONNEN,
+    aanpas_prompt,
+    aanpassing_samenvoegen,
+    bron_van,
     herkomst,
     is_vreemde_taal,
     kwaliteit,
     overneem_prompt,
     recept_uit_jsonld,
     recept_van_jsonld,
+    recept_verschil,
     schoon_bronnen,
     verrijk_prompt,
     verrijk_toepassen,
@@ -60,6 +84,11 @@ _LOGGER = logging.getLogger(__name__)
 MARKER = re.compile(r"\beten:([0-9a-f]{8,32})\b")
 GEEN_TITEL = "Geen maaltijd"
 UIT_VRIEZER = re.compile(r"(?i)\buit\s+(de\s+)?vriezer\b")
+SITEMAP_BEWAAR = 86400  # sitemaps van bronnen een dag onthouden
+MAX_SITEMAPS = 15       # hooguit zoveel sitemap-bestanden per bron lezen
+MAX_LINKS = 40000
+MAX_FOTO = 8 * 1024 * 1024
+FOTO_MAP = "eten_fotos"
 SYNC_INTERVAL = 60  # agenda hooguit elke minuut teruglezen (leest de lokale kopie van de agenda)
 VERWIJDER_NA = 600  # een maaltijd die 10 minuten uit de agenda weg is, is echt verwijderd
 DAGEN = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
@@ -364,6 +393,12 @@ def schoon_recept(r: dict, bestaand: dict | None = None) -> dict:
         "notitie": r.get("notitie") or "",
         "bijgewerkt": datetime.now().isoformat(timespec="minutes"),
     })
+    for k in ("bron_naam", "variant_van", "variant_van_naam", "aanpassing", "vorige"):
+        waarde = r[k] if k in r else (bestaand or {}).get(k)
+        if waarde:
+            uit[k] = waarde
+        else:
+            uit.pop(k, None)
     return uit
 
 
@@ -375,6 +410,8 @@ class Eten:
         self._store: Store = Store(self.hass, 1, f"boodschappen.{entry_id}.eten")
         self.s: dict[str, Any] = {}
         self._sync_ts = 0.0
+        self._sitemaps: dict[str, dict] = {}
+        self._zoek_nota = ""
         self._ooit_gelezen = False
         self.extern: list[dict] = []  # agenda-events zonder kenmerk (bijv. handmatig ingevoerd)
         self.sync_fout: str | None = None
@@ -388,10 +425,14 @@ class Eten:
             "suggesties": data.get("suggesties", {}),
             "beoordelingen": data.get("beoordelingen", []),
             "feedback": data.get("feedback", {}),
+            "aanpassingen": data.get("aanpassingen", {}),
             "instellingen": {**copy.deepcopy(DEFAULT_INSTELLINGEN), **(data.get("instellingen") or {})},
         }
         self.s["instellingen"].update(schoon_menu(self.s["instellingen"]))
         self.s["instellingen"]["bronnen"] = schoon_bronnen(self.s["instellingen"].get("bronnen"))
+        for b in self.s["instellingen"]["bronnen"]:
+            if b["domein"] == "ottolenghi.co.uk" and not b["pad"]:
+                b["pad"] = "/pages/recipes"  # de recepten van Ottolenghi staan onder /pages/recipes
         if self.s["voorstel"] and self.s["voorstel"].get("versie") != 2:
             self.s["voorstel"] = None  # voorstel in het oude formaat (één gerecht per dag): opnieuw maken
 
@@ -425,6 +466,8 @@ class Eten:
             "beoordelingen": self.s["beoordelingen"][-400:],
             "feedback": self.s["feedback"],
             "feedback_soorten": FEEDBACK,
+            "aanpassingen": self.s.get("aanpassingen", {}),
+            "bronnen_info": self.bronnen_info(gem),
             "instellingen": self.inst,
             "extern": self.extern,
             "sync_fout": self.sync_fout,
@@ -444,7 +487,8 @@ class Eten:
         self.s["recepten"].pop(rid, None)
         self.save()
 
-    async def recept_importeren(self, url: str | None, tekst: str | None) -> str:
+    async def recept_importeren(self, url: str | None, tekst: str | None, fotos: list[str] | None = None,
+                                bron_naam: str | None = None) -> str:
         """Recept van een link of uit geplakte tekst.
 
         Heeft de pagina een schema.org-recept, dan nemen we ingrediënten en bereiding letterlijk over en koppelt de
@@ -479,15 +523,65 @@ class Eten:
                     raise ValueError("Op deze pagina staat geen volledig recept")
             recept["bron"] = url
             recept["eigen"] = False
+        elif fotos:
+            recept = await self._recept_uit_fotos(fotos, producten, bron_naam)
         else:
             bron = (tekst or "").strip()
             if not bron:
-                raise ValueError("Geef een link of plak een recept")
+                raise ValueError("Geef een link, plak een recept of maak een foto")
             recept = await self._vraag_ai("Eten: recept overnemen", overneem_prompt(bron, producten))
             if not isinstance(recept, dict) or not recept.get("naam"):
                 raise ValueError("De AI kon er geen recept van maken")
+        if not url and bron_naam:
+            if bron_naam.lower() not in {b["naam"].lower() for b in self.inst["bronnen"]}:
+                raise ValueError("Onbekende bron")
+            recept["bron_naam"] = next(b["naam"] for b in self.inst["bronnen"] if b["naam"].lower() == bron_naam.lower())
         recept.pop("id", None)
         return self.recept_opslaan(recept)
+
+    async def _recept_uit_fotos(self, fotos: list[str], producten: list[dict], bron_naam: str | None) -> dict:
+        """Recept uit één of meer foto's (bijv. een kookboekpagina): de AI leest ze, wij bewaren niets van de foto."""
+        media = (self.hass.config.media_dirs or {}).get("local")
+        if not media:
+            raise ValueError("Er is geen media-map ingesteld in Home Assistant, dus foto's lezen kan niet")
+        if len(fotos) > 4:
+            raise ValueError("Hooguit 4 foto's per recept")
+        bestanden: list[tuple[str, str, bytes]] = []  # (naam, mime, bytes)
+        for f in fotos:
+            m = re.fullmatch(r"data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\s]+)", str(f).strip())
+            if not m:
+                raise ValueError("Dit soort bestand kan ik niet lezen (gebruik een JPEG-, PNG- of WebP-foto)")
+            data = base64.b64decode(m.group(2))
+            if len(data) > MAX_FOTO:
+                raise ValueError("Een foto is te groot (max 8 MB)")
+            ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[m.group(1)]
+            bestanden.append((f"{nieuw_id()}.{ext}", m.group(1), data))
+        from pathlib import Path
+
+        map_ = Path(media) / FOTO_MAP
+
+        def schrijf() -> None:
+            map_.mkdir(parents=True, exist_ok=True)
+            for naam, _mime, data in bestanden:
+                (map_ / naam).write_bytes(data)
+
+        def opruimen() -> None:
+            for naam, _mime, _data in bestanden:
+                (map_ / naam).unlink(missing_ok=True)
+
+        await self.hass.async_add_executor_job(schrijf)
+        try:
+            res = await self._vraag_ai(
+                "Eten: recept uit foto", foto_prompt(producten, len(bestanden), bron_naam),
+                attachments=[{"media_content_id": f"media-source://media_source/local/{FOTO_MAP}/{naam}", "media_content_type": mime}
+                             for naam, mime, _d in bestanden])
+        finally:
+            await self.hass.async_add_executor_job(opruimen)
+        if not isinstance(res, dict) or not res.get("naam"):
+            raise ValueError("Ik kon op de foto geen volledig recept lezen. Probeer een scherpere foto of fotografeer de hele pagina.")
+        res["bron"] = None
+        res["eigen"] = False
+        return res
 
     async def recept_koppelen(self, rid: str) -> None:
         """Laat de AI de ingrediënten (opnieuw) aan Grocy-producten koppelen; de tekst van het recept blijft staan."""
@@ -510,6 +604,277 @@ class Eten:
     def _producten(self) -> list[dict]:
         d = self.c.data
         return [{"id": pid, "name": p["name"]} for pid, p in d.products.items() if str(p.get("active", 1)) != "0"]
+
+    # --- recept aanpassen met Gemini --------------------------------------------
+    async def recept_aanpassen(self, rid: str, wens: str) -> None:
+        """Laat Gemini een recept aanpassen. Het resultaat is een voorstel (met verschil); pas na kiezen wordt er iets bewaard."""
+        r = self.s["recepten"].get(rid)
+        if not r:
+            raise ValueError("Recept niet gevonden")
+        wens = (wens or "").strip()
+        if not wens:
+            raise ValueError("Vertel Gemini wat er anders moet, bijvoorbeeld 'maak het vegetarisch'")
+        context = context_tekst(self.menu, self.inst.get("huisregels", ""), self.s["feedback"], date.today())
+        fb = sorted((self.s["feedback"].get(rid) or {}).get("soorten") or {})
+        if fb:
+            context += f"\nFeedback van het gezin op dit recept: {', '.join(fb)}."
+        producten = self._producten()
+        correctie, nieuw, punten = "", None, []
+        for poging in range(2):
+            res = await self._vraag_ai("Eten: recept aanpassen", aanpas_prompt(r, wens, producten, context, correctie))
+            nieuw = aanpassing_samenvoegen(r, res)
+            punten = kwaliteit(nieuw)
+            if not punten or poging == 1:
+                break
+            correctie = "; ".join(punten) + ". Maak het recept compleet (alle ingrediënten, kruiden en stappen)."
+        self.s["aanpassingen"][rid] = {
+            "wens": wens, "recept": nieuw, "wijzigingen": nieuw.pop("wijzigingen", []), "verschil": recept_verschil(r, nieuw),
+            "kwaliteit": punten, "gemaakt": datetime.now().isoformat(timespec="minutes"),
+        }
+        self.save()
+
+    def aanpassing_weg(self, rid: str) -> None:
+        self.s["aanpassingen"].pop(rid, None)
+        self.save()
+
+    def aanpassing_toepassen(self, rid: str, modus: str) -> str:
+        """Voorstel bewaren: als variant (nieuw recept, origineel blijft) of het origineel vervangen (vorige versie bewaard)."""
+        p = self.s["aanpassingen"].get(rid)
+        r = self.s["recepten"].get(rid)
+        if not p or not r:
+            raise ValueError("Er is geen voorstel voor dit recept")
+        inhoud = {k: p["recept"].get(k) for k in ("naam", "porties", "tijd", "vega", "tags", "ingredienten", "stappen")}
+        if modus == "variant":
+            naam = inhoud["naam"] or r["naam"]
+            if naam.strip().lower() == r["naam"].strip().lower():
+                naam += " (aangepast)"
+            nieuw = {**{k: v for k, v in r.items() if k not in ("id", "vorige", "variant_van", "variant_van_naam", "aanpassing")},
+                     **inhoud, "naam": naam, "id": None, "vega_gezet": True,
+                     "variant_van": r["id"], "variant_van_naam": r["naam"], "aanpassing": p["wens"]}
+            nieuw_id_ = schoon_recept(nieuw, None)
+            self.s["recepten"][nieuw_id_["id"]] = nieuw_id_
+            uit = nieuw_id_["id"]
+        elif modus == "vervang":
+            vorige = {k: r.get(k) for k in ("naam", "porties", "tijd", "vega", "tags", "ingredienten", "stappen")}
+            samen = {**r, **inhoud, "vega_gezet": True, "vorige": vorige, "aanpassing": p["wens"]}
+            self.s["recepten"][rid] = schoon_recept(samen, r)
+            uit = rid
+        else:
+            raise ValueError("Onbekende keuze")
+        self.s["aanpassingen"].pop(rid, None)
+        self.save()
+        return uit
+
+    def aanpassing_ongedaan(self, rid: str) -> None:
+        r = self.s["recepten"].get(rid)
+        if not r or not r.get("vorige"):
+            raise ValueError("Er is geen vorige versie om naar terug te gaan")
+        samen = {**r, **r["vorige"], "vorige": None, "aanpassing": None}
+        self.s["recepten"][rid] = schoon_recept(samen, r)
+        self.save()
+
+    # --- bronnen ------------------------------------------------------------------
+    def bronnen_info(self, gem: dict | None = None) -> dict[str, dict]:
+        """Per bron: aantal recepten, gemiddelde score van het gezin en feedback. {naam: {...}}"""
+        gem = gem if gem is not None else gemiddelden(self.s["beoordelingen"])
+        bronnen = self.inst["bronnen"]
+        info = {b["naam"]: {"recepten": 0, "scores": [], "wel": 0, "niet": 0, "ai_check": 0} for b in bronnen}
+        for r in self.s["recepten"].values():
+            h = herkomst(r, bronnen)
+            if h["soort"] != "bron" or h["naam"] not in info:
+                continue
+            i = info[h["naam"]]
+            i["recepten"] += 1
+            g = gem.get(r["id"])
+            if g:
+                i["scores"].append(g["gem"])
+            soorten = (self.s["feedback"].get(r["id"]) or {}).get("soorten") or {}
+            i["wel"] += 1 if "wel_lekker" in soorten else 0
+            i["niet"] += 1 if "niet_lekker" in soorten else 0
+        return {n: {"recepten": i["recepten"], "score": round(sum(i["scores"]) / len(i["scores"]), 1) if i["scores"] else None,
+                    "wel": i["wel"], "niet": i["niet"]} for n, i in info.items()}
+
+    def bronnen_opslaan(self, lijst: list[dict]) -> None:
+        """De hele bronnenlijst vervangen. Een bron met 'oud' (vorige naam) is hernoemd: recepten die eraan hangen gaan mee."""
+        hernoemd = {str(b["oud"]).strip().lower(): str(b.get("naam") or "").strip() for b in lijst
+                    if isinstance(b, dict) and b.get("oud") and str(b.get("naam") or "").strip()
+                    and str(b["oud"]).strip().lower() != str(b["naam"]).strip().lower()}
+        schoon = schoon_bronnen(lijst)
+        if not schoon and lijst:
+            raise ValueError("Geef de bron een naam en (bij een website) een adres")
+        namen = {b["naam"].lower() for b in schoon}
+        for r in self.s["recepten"].values():
+            bn = str(r.get("bron_naam") or "").lower()
+            if bn in hernoemd and hernoemd[bn].lower() in namen:
+                r["bron_naam"] = next(b["naam"] for b in schoon if b["naam"].lower() == hernoemd[bn].lower())
+        self.inst["bronnen"] = schoon
+        self.save()
+
+    def recept_bron_zetten(self, rid: str, bron_naam: str | None, eigen: bool = False) -> None:
+        """Herkomst van een recept met de hand koppelen: aan een bron, als eigen recept, of terug naar onbekend."""
+        r = self.s["recepten"].get(rid)
+        if not r:
+            raise ValueError("Recept niet gevonden")
+        if bron_naam:
+            echt = next((b["naam"] for b in self.inst["bronnen"] if b["naam"].lower() == bron_naam.lower()), None)
+            if not echt:
+                raise ValueError("Onbekende bron")
+            r["bron_naam"], r["eigen"] = echt, False
+            if str(r.get("bron") or "").lower() in ("ai", "gemini"):
+                r["bron"] = None
+            r["tags"] = [t for t in r.get("tags") or [] if t != "nieuw"]
+        else:
+            r.pop("bron_naam", None)
+            r["eigen"] = bool(eigen)
+        self.save()
+
+    async def _haal(self, url: str, max_tekens: int = 3_000_000) -> str:
+        session = async_get_clientsession(self.hass)
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=25), headers=HEADERS) as resp:
+            if resp.status >= 400:
+                raise ValueError(f"Niet bereikbaar (HTTP {resp.status})")
+            return (await resp.text())[:max_tekens]
+
+    async def _sitemap_start(self, bron: dict) -> dict:
+        """Begin met het inlezen van de sitemaps van een bron: de wachtrij vullen uit robots.txt of de gebruikelijke plekken."""
+        basis = f"https://{bron['domein']}"
+        uit_robots: list[str] = []
+        try:
+            uit_robots = sitemaps_uit_robots(await self._haal(basis + "/robots.txt", 200_000))
+        except Exception as err:  # noqa: BLE001 - geen robots.txt: dan de gebruikelijke plekken
+            _LOGGER.debug("robots.txt van %s: %s", bron["domein"], err)
+        return {"ts": time.time(), "links": [], "wachtrij": list(dict.fromkeys(uit_robots)),
+                "reserve": [basis + p for p in SITEMAP_PADEN], "gelezen": 0, "klaar": False}
+
+    async def _sitemap_verder(self, bron: dict, e: dict, budget: float) -> None:
+        """Lees sitemaps tot de tijd op is of alles gelezen is. Vier tegelijk; alleen links die bij de bron horen blijven."""
+        eind = time.monotonic() + budget
+        while time.monotonic() < eind and e["gelezen"] < MAX_SITEMAPS and len(e["links"]) < MAX_LINKS:
+            if not e["wachtrij"]:
+                if e["reserve"] and not e["links"]:
+                    e["wachtrij"], e["reserve"] = e["reserve"], []
+                else:
+                    e["klaar"] = True
+                    return
+            groep = [u for u in e["wachtrij"][:4]]
+            e["wachtrij"] = e["wachtrij"][4:]
+            groep = [u for u in groep if not u.lower().endswith(".gz")]
+
+            async def lees(url: str) -> tuple[str, str | None]:
+                try:
+                    return url, await self._haal(url, 12_000_000)
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.debug("Sitemap %s: %s", url, err)
+                    return url, None
+
+            for _url, xml in await asyncio.gather(*(lees(u) for u in groep)):
+                e["gelezen"] += 1
+                if xml is None:
+                    continue
+                locs = sitemap_locs(xml)
+                if is_sitemap_index(xml):
+                    e["wachtrij"] = sitemap_volgorde(locs) + e["wachtrij"]
+                else:
+                    e["links"].extend(u for u in locs if bron_van(u, [bron]) and receptlink_mogelijk(u, bron))
+        if not e["wachtrij"] and not (e["reserve"] and not e["links"]):
+            e["klaar"] = True
+        e["links"] = list(dict.fromkeys(e["links"]))[:MAX_LINKS]
+
+    async def _bron_links(self, bron: dict, vernieuw: bool = False, budget: float = 40.0) -> tuple[list[str], dict]:
+        """Mogelijke receptlinks van een websitebron. Grote sites worden stap voor stap ingelezen (en een dag onthouden);
+        status: {klaar, gelezen, wachtrij}."""
+        sleutel = bron["domein"] + bron.get("pad", "")
+        e = self._sitemaps.get(sleutel)
+        if vernieuw or e is None or (e["klaar"] and time.time() - e["ts"] > SITEMAP_BEWAAR):
+            e = self._sitemaps[sleutel] = await self._sitemap_start(bron)
+        if not e["klaar"]:
+            await self._sitemap_verder(bron, e, budget)
+        return list(e["links"]), {"klaar": e["klaar"], "gelezen": e["gelezen"], "wachtrij": len(e["wachtrij"])}
+
+    async def bron_controleren(self, url: str) -> dict:
+        """Een nieuwe bron nakijken: naam, kunnen we er recepten van lezen en kunnen we erin zoeken."""
+        url = (url or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            url = "https://" + url
+        p = urlparse(url)
+        domein = re.sub(r"(?i)^www\.", "", p.hostname or "").lower()
+        if not domein or "." not in domein:
+            raise ValueError("Dat is geen geldig adres")
+        pad = p.path.rstrip("/")
+        try:
+            pagina = await self._haal(url, 2_000_000)
+        except ValueError as err:
+            raise ValueError(f"De site is niet te bereiken: {err}") from err
+        except Exception as err:  # noqa: BLE001
+            raise ValueError(f"De site is niet te bereiken ({type(err).__name__})") from err
+        bron = {"naam": site_naam(pagina, domein), "domein": domein, "pad": pad, "type": "website", "aan": True, "notitie": ""}
+        links: list[str] = []
+        status: dict = {"klaar": True, "gelezen": 0, "wachtrij": 0}
+        try:
+            links, status = await self._bron_links(bron, vernieuw=True, budget=20.0)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Sitemap controleren: %s", err)
+        leesbaar = bool(recept_uit_jsonld(pagina))
+        if not leesbaar:
+            for l in links[:2]:  # steekproef: twee pagina's (receptsites vragen om rust; we doen er maar weinig)
+                try:
+                    if recept_uit_jsonld(await self._haal(l, 2_000_000)):
+                        leesbaar = True
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+        advies = bron_advies(leesbaar, len(links))
+        if not status["klaar"]:
+            advies += f" (De sitemap is groot; ik las {status['gelezen']} bestanden en lees de rest bij het zoeken verder in.)"
+        return {**bron, "gevonden": len(links), "leesbaar": leesbaar, "advies": advies}
+
+    async def bron_zoeken(self, bron_naam: str | None, vraag: str, ai: bool = False) -> dict:
+        """Recepten zoeken in de bronnen (websites). Zonder vraag een willekeurige greep. ai=True: Gemini kiest uit de kandidaten
+        wat bij de wens, het gezin, de voorraad en de aanbiedingen past. Resultaat: {resultaten: [{url, titel, bron, reden}], nota}."""
+        bronnen = [b for b in self.inst["bronnen"] if b["type"] == "website" and b.get("aan", True)]
+        if bron_naam:
+            bronnen = [b for b in bronnen if b["naam"].lower() == bron_naam.lower()]
+            if not bronnen:
+                raise ValueError("Die bron staat niet aan of is geen website")
+        if not bronnen:
+            raise ValueError("Er is geen website als bron. Voeg er een toe bij Bronnen.")
+        klaar = {url_sleutel(r.get("bron")) for r in self.s["recepten"].values() if r.get("bron")}
+        per_url: dict[str, str] = {}
+        fouten: list[str] = []
+        bezig: list[str] = []
+        for b in bronnen:
+            try:
+                links, status = await self._bron_links(b, budget=40.0 / len(bronnen))
+                for u in links:
+                    per_url.setdefault(u, b["naam"])
+                if not status["klaar"]:
+                    bezig.append(f"{b['naam']} ({status['gelezen']} bestanden gelezen)")
+            except Exception as err:  # noqa: BLE001
+                fouten.append(f"{b['naam']}: {err}")
+        if not per_url:
+            if bezig:
+                raise ValueError("Ik ben nog bezig met het inlezen van " + ", ".join(bezig) + ". Probeer het over een minuut nog eens.")
+            raise ValueError("Ik kon in deze bron(nen) niets vinden om in te zoeken." + (f" ({'; '.join(fouten)})" if fouten else "")
+                             + " Plak een link of gebruik een foto.")
+        self._zoek_nota = ("Nog niet alles ingelezen: " + ", ".join(bezig) + ". Zoek straks nog eens voor meer resultaten.") if bezig else ""
+        vraag = (vraag or "").strip()
+        if not ai:
+            links = zoek_links(list(per_url), vraag, klaar, 12)
+            return {"resultaten": [{"url": u, "titel": titel_uit_url(u), "bron": per_url[u], "reden": ""} for u in links],
+                    "nota": self._zoek_nota}
+        kand = kandidaten_voor_ai(list(per_url), vraag, klaar, 300)
+        kandidaten = [{"n": n, "url": u, "titel": titel_uit_url(u), "bron": per_url[u]} for n, u in enumerate(kand, 1)]
+        voorraad, _bijna = await self._voorraad()
+        namen = {p["id"]: p["name"] for p in self._producten()}
+        in_huis = sorted({namen[pid] for pid, a in voorraad.items() if a and pid in namen})[:80]
+        acties = sorted({namen[pid] for pid in self._acties() if pid in namen})[:25]
+        context = context_tekst(self.menu, self.inst.get("huisregels", ""), self.s["feedback"], date.today())
+        res = await self._vraag_ai("Eten: recepten kiezen uit bronnen", kies_prompt(kandidaten, vraag, context, in_huis, acties))
+        gekozen = kies_toepassen(res, kandidaten)
+        if not gekozen:
+            raise ValueError("Gemini kon niets passends kiezen. Probeer een andere wens of zoek zelf.")
+        return {"resultaten": [{"url": k["url"], "titel": k["titel"], "bron": k["bron"], "reden": k["reden"]} for k in gekozen],
+                "nota": self._zoek_nota}
 
     # --- weekmenu ---------------------------------------------------------
     # --- weekmenu: context ----------------------------------------------------
@@ -1202,15 +1567,17 @@ class Eten:
             self.save()
 
     # --- AI ---------------------------------------------------------------
-    async def _vraag_ai(self, taak: str, instructie: str) -> Any:
+    async def _vraag_ai(self, taak: str, instructie: str, attachments: list[dict] | None = None) -> Any:
         ent = self.inst.get("ai") or next(iter(sorted(self.hass.states.async_entity_ids("ai_task"))), None)
         if not ent:
             raise ValueError("Geen AI-taak (ai_task) gevonden")
         for poging in range(3):
             try:
+                data = {"task_name": taak, "instructions": instructie, "entity_id": ent}
+                if attachments:
+                    data["attachments"] = attachments
                 res = await self.hass.services.async_call(
-                    "ai_task", "generate_data", {"task_name": taak, "instructions": instructie, "entity_id": ent},
-                    blocking=True, return_response=True,
+                    "ai_task", "generate_data", data, blocking=True, return_response=True,
                 )
                 return parse_json((res or {}).get("data"))
             except Exception as err:  # noqa: BLE001 - tijdelijke drukte bij de AI-dienst: kort wachten en opnieuw

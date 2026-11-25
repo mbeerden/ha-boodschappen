@@ -49,6 +49,19 @@ async def main():
     async def geenrecept(req):
         return web.Response(content_type="text/html", text="<html><body><p>Alleen een verhaaltje.</p></body></html>")
 
+    async def robots(req):
+        return web.Response(text="User-agent: *\nSitemap: https://127.0.0.1/sitemap.xml\n")
+
+    async def sitemap(req):
+        return web.Response(content_type="application/xml", text="""<urlset>
+        <url><loc>https://127.0.0.1/linzensoep-met-kokos</loc></url><url><loc>https://127.0.0.1/pasta-pesto-met-spinazie</loc></url>
+        <url><loc>https://127.0.0.1/rode-linzen-curry</loc></url><url><loc>https://127.0.0.1/categorie/soep</loc></url>
+        <url><loc>https://elders.nl/linzensoep-andere-site</loc></url></urlset>""")
+
+    app.router.add_get("/robots.txt", robots)
+    app.router.add_get("/sitemap.xml", sitemap)
+    app.router.add_get("/", receptpagina)
+    app.router.add_get("/linzensoep-met-kokos", receptpagina)
     app.router.add_get("/recept", receptpagina)
     app.router.add_get("/verhaal", geenrecept)
     runner = web.AppRunner(app)
@@ -124,6 +137,18 @@ async def main():
                     opties.append({"rol": "nieuw", "recept_id": None, "titel": f"Extra {len(opties)}", "reden": "-"})
                 uit.append({"datum": d["datum"], "dag": d["dag"], "opties": opties})
             return {"data": json.dumps(uit)}
+        if "recept aanpassen" in call.data["task_name"]:
+            assert "Wens:" in instr and "Huidig recept:" in instr
+            if "kapot" in instr:
+                return {"data": json.dumps({"naam": "X", "ingredienten": ["een"], "stappen": []})}
+            return {"data": json.dumps({
+                "naam": "Linzensoep met kokos", "porties": 4, "tijd": 40, "vega": True, "tags": ["soep"],
+                "ingredienten": [{"tekst": "2 uien", "product_id": 7, "aantal": 9}, {"tekst": "200 ml kokosmelk", "product_id": None, "aantal": 1},
+                                 {"tekst": "2 paprika", "product_id": 7, "aantal": 2}, {"tekst": "zout", "basis": True}],
+                "stappen": ["Fruit de ui", "Voeg de kokosmelk toe en kook 20 minuten"], "wijzigingen": ["Kokosmelk erbij"]})}
+        if "recepten kiezen" in call.data["task_name"]:
+            nrs = {m.group(2): int(m.group(1)) for m in re.finditer(r"^(\d+)\. (.+)$", instr.split("Gerechten:\n", 1)[1], re.M)}
+            return {"data": json.dumps([{"n": nrs["Rode linzen curry"], "reden": "linzen in huis"}, {"n": 999, "reden": "verzonnen"}])}
         if "dag aanpassen" in call.data["task_name"]:
             dag = re.search(r"Deze dag: ([A-Z]+) (\S+)", instr)
             assert dag, "dag ontbreekt in prompt"
@@ -453,6 +478,83 @@ async def main():
     check(sg["geen"] and sg["titel"] == "Geen maaltijd" and not sg["recept_id"], "AI-suggestie: geen maaltijd")
     e.suggestie_weg(dag16)
     await e.plan_verwijderen(pg["id"])
+
+    # --- recept aanpassen met Gemini ---
+    pr_id = e.recept_opslaan({"naam": "Linzensoep", "porties": 4, "tijd": 35, "vega": True, "tags": ["soep"],
+                              "ingredienten": [{"tekst": "2 uien", "product_id": 15, "aantal": 2}, {"tekst": "2 paprika", "product_id": 7, "aantal": 2},
+                                               {"tekst": "zout", "basis": True}], "stappen": ["Fruit de ui", "Kook 20 minuten"]})
+    n_voor = len(e.s["recepten"])
+    try:
+        await e.recept_aanpassen(pr_id, "  ")
+        check(False, "lege wens geweigerd")
+    except ValueError:
+        check(True, "lege wens geweigerd")
+    await e.recept_aanpassen(pr_id, "met kokosmelk")
+    vs = e.s["aanpassingen"][pr_id]
+    check(len(e.s["recepten"]) == n_voor and e.s["recepten"][pr_id]["naam"] == "Linzensoep", "voorstel bewaart nog niets")
+    check(vs["verschil"]["ingredienten"]["erbij"] == ["200 ml kokosmelk"] and vs["wijzigingen"] == ["Kokosmelk erbij"],
+          "verschil en wijzigingen in het voorstel")
+    check({i["tekst"]: i["product_id"] for i in vs["recept"]["ingredienten"]}["2 uien"] == 15, "koppeling van onveranderde regel blijft")
+    check(next(x for x in e.payload()["aanpassingen"].values())["wens"] == "met kokosmelk" if isinstance(e.payload()["aanpassingen"], dict)
+          else True, "voorstel in payload")
+    e.aanpassing_weg(pr_id)
+    check(pr_id not in e.s["aanpassingen"], "voorstel weggegooid")
+    await e.recept_aanpassen(pr_id, "met kokosmelk")
+    var = e.aanpassing_toepassen(pr_id, "variant")
+    v = e.s["recepten"][var]
+    check(var != pr_id and v["variant_van"] == pr_id and v["variant_van_naam"] == "Linzensoep" and v["naam"] == "Linzensoep met kokos"
+          and e.s["recepten"][pr_id]["naam"] == "Linzensoep" and pr_id not in e.s["aanpassingen"], "opgeslagen als variant, origineel blijft")
+    await e.recept_aanpassen(pr_id, "met kokosmelk")
+    e.aanpassing_toepassen(pr_id, "vervang")
+    o = e.s["recepten"][pr_id]
+    check(o["naam"] == "Linzensoep met kokos" and o["vorige"]["naam"] == "Linzensoep" and o["id"] == pr_id, "origineel vervangen, vorige bewaard")
+    e.aanpassing_ongedaan(pr_id)
+    o = e.s["recepten"][pr_id]
+    check(o["naam"] == "Linzensoep" and not o.get("vorige") and [i["tekst"] for i in o["ingredienten"]][:2] == ["2 uien", "2 paprika"],
+          "ongedaan gemaakt")
+    try:
+        await e.recept_aanpassen(pr_id, "kapot")
+        check(False, "onbruikbaar AI-antwoord geweigerd")
+    except ValueError:
+        check(pr_id not in e.s["aanpassingen"], "onbruikbaar AI-antwoord geweigerd, niets bewaard")
+    e.recept_verwijderen(var)
+    e.recept_verwijderen(pr_id)
+
+    # --- bronnen beheren, controleren en doorzoeken ---
+    orig_haal = e._haal
+
+    async def haal(url, max_tekens=3_000_000):
+        return await orig_haal(url.replace("https://127.0.0.1", "http://127.0.0.1:9192", 1), max_tekens)
+
+    e._haal = haal
+    chk = await e.bron_controleren("127.0.0.1")
+    check(chk["leesbaar"] and chk["gevonden"] == 3 and chk["domein"] == "127.0.0.1", f"bron controleren: leesbaar, 3 mogelijke links ({chk.get('gevonden')})")
+    e.bronnen_opslaan([{"naam": "Testkok", "domein": "127.0.0.1"}, {"naam": "Plenty", "type": "boek", "notitie": "kast"}])
+    check([b["naam"] for b in e.inst["bronnen"]] == ["Testkok", "Plenty"] and e.inst["bronnen"][1]["type"] == "boek", "bronnen opgeslagen met type")
+    zo = await e.bron_zoeken(None, "linzen")
+    check({r["titel"] for r in zo["resultaten"]} == {"Linzensoep met kokos", "Rode linzen curry"} and all(r["bron"] == "Testkok" for r in zo["resultaten"]),
+          f"zoeken: alleen linzen van de eigen site ({[r['titel'] for r in zo['resultaten']]})")
+    ai_zo = await e.bron_zoeken("Testkok", "iets snels", ai=True)
+    check([r["titel"] for r in ai_zo["resultaten"]] == ["Rode linzen curry"] and ai_zo["resultaten"][0]["reden"] == "linzen in huis",
+          "zoeken met Gemini: nummer 999 genegeerd, reden meegegeven")
+    check("Wens: iets snels" in AI_LOG[-1] and "In huis (voorraad):" in AI_LOG[-1], "kies-prompt met wens en voorraad")
+    # al toegevoegd valt af
+    e.recept_opslaan({"naam": "Curry", "bron": "https://www.127.0.0.1/rode-linzen-curry", "ingredienten": ["a"], "stappen": ["b"]})
+    zo2 = await e.bron_zoeken(None, "linzen")
+    check([r["titel"] for r in zo2["resultaten"]] == ["Linzensoep met kokos"], "al toegevoegd recept niet nog eens aangeboden")
+    # herkomst en hernoemen
+    cid2 = e.recept_opslaan({"naam": "Bronrecept", "bron_naam": "Testkok", "ingredienten": ["a"], "stappen": ["b"]})
+    e.bronnen_opslaan([{"oud": "Testkok", "naam": "Kookclub", "domein": "127.0.0.1"}, {"naam": "Plenty", "type": "boek"}])
+    check(e.s["recepten"][cid2]["bron_naam"] == "Kookclub", "hernoemde bron: recepten gaan mee")
+    check(next(x for x in e.payload()["recepten"] if x["id"] == cid2)["herkomst"] == {"soort": "bron", "naam": "Kookclub"}, "herkomst volgt de bron")
+    e.recept_bron_zetten(cid2, "Plenty")
+    check(e.s["recepten"][cid2]["bron_naam"] == "Plenty", "recept aan een boek gekoppeld")
+    try:
+        await e.bron_zoeken("Plenty", "x")
+        check(False, "boek heeft geen zoek")
+    except ValueError:
+        check(True, "boek is niet te doorzoeken")
+    e._haal = orig_haal
 
     await e.plan_verwijderen(pid)
     await e.sync(forceer=True)

@@ -4,7 +4,8 @@
   "after_dependencies": [
     "grocy",
     "calendar",
-    "ai_task"
+    "ai_task",
+    "media_source"
   ],
   "codeowners": [],
   "config_flow": true,
@@ -19,5 +20,5 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/mbeerden/ha-boodschappen/issues",
   "requirements": [],
-  "version": "0.11.1"
+  "version": "0.12.0"
 }

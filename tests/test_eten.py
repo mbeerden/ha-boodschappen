@@ -302,9 +302,10 @@ def test_bronnen_en_herkomst():
     assert herkomst({"bron": None, "tags": ["pasta", "nieuw"]}, bronnen)["soort"] == "ai"
     assert herkomst({"bron": None, "tags": ["AGV"]}, bronnen)["soort"] == "onbekend"
     assert herkomst({"bron": None, "eigen": True}, bronnen)["soort"] == "eigen"
+    extra = {"type": "website", "aan": True, "notitie": ""}
     assert schoon_bronnen("Jamie | https://www.jamieoliver.com/recipes/\nmob.co.uk") == [
-        {"naam": "Jamie", "domein": "jamieoliver.com", "pad": "/recipes"},
-        {"naam": "mob.co.uk", "domein": "mob.co.uk", "pad": ""}]
+        {"naam": "Jamie", "domein": "jamieoliver.com", "pad": "/recipes", **extra},
+        {"naam": "mob.co.uk", "domein": "mob.co.uk", "pad": "", **extra}]
 
 
 def test_bereiding_herkent_meervoud_en_samenstellingen():

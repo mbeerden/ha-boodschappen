@@ -40,6 +40,8 @@ const SOORT = [
   ["niet", "Niet thuis"],
 ];
 const KORT = ["ma", "di", "wo", "do", "vr", "za", "zo"];
+const SNEL_AANPASSEN = ["Vegetarisch maken", "Sneller klaar (max 30 min)", "Meer kruiden en smaak", "Koolhydraatarmer", "Voor 5 personen", "Zonder oven", "Pittiger", "Kindvriendelijker"];
+const BRON_TYPE = { website: "Website", boek: "Kookboek", anders: "Anders" };
 
 class EtenPanel extends HTMLElement {
   constructor() {
@@ -95,7 +97,7 @@ class EtenPanel extends HTMLElement {
 
   _poll() {
     const a = this.shadowRoot.activeElement;
-    if (this.busy || this.edit || this.aanpas || (this.view && this.view.soort !== "recept") || (a && /INPUT|SELECT|TEXTAREA/.test(a.tagName))) return;
+    if (this.busy || this.edit || this.aanpas || this.raanpas || (this.view && this.view.soort !== "recept") || (a && /INPUT|SELECT|TEXTAREA/.test(a.tagName))) return;
     this._load();
   }
 
@@ -135,6 +137,7 @@ class EtenPanel extends HTMLElement {
       <header>
         <div class="menu"></div>
         <h1>Eten</h1>
+        <button class="hbtn" data-act="bronnen" aria-label="Bronnen" title="Bronnen van recepten">📚</button>
         <button class="hbtn" data-act="instellingen" aria-label="Instellingen" title="Instellingen">⚙</button>
       </header>
       <nav class="tabs" role="tablist"></nav>
@@ -150,6 +153,12 @@ class EtenPanel extends HTMLElement {
     root.addEventListener("click", (e) => this._click(e));
     root.addEventListener("input", (e) => this._input(e));
     root.addEventListener("change", (e) => this._change(e));
+    root.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.target.id === "ont-vraag") {
+        e.preventDefault();
+        root.querySelector("[data-act=ontzoek]")?.click();
+      }
+    });
   }
 
   get recepten() {
@@ -191,6 +200,8 @@ class EtenPanel extends HTMLElement {
       else if (v.soort === "plannen") main.innerHTML = this._plannenView();
       else if (v.soort === "voorstel") main.innerHTML = this._voorstelView();
       else if (v.soort === "benodigd") main.innerHTML = this._benodigdView();
+      else if (v.soort === "bronnen") main.innerHTML = this._bronnenView();
+      else if (v.soort === "ontdek") main.innerHTML = this._ontdekView();
       main.classList.toggle("koken", v.soort === "koken");
     } else {
       main.classList.remove("koken");
@@ -695,6 +706,7 @@ class EtenPanel extends HTMLElement {
     const tags = [...new Set(this.recepten.flatMap((r) => r.tags || []))].sort();
     return `<div class="add">
         <input id="zoek" type="search" placeholder="Zoek recept of ingrediënt" value="${esc(this.zoek)}" aria-label="Zoek recept">
+        <button class="addbtn zoekbtn" data-act="ontdek" aria-label="Ontdek recepten uit je bronnen" title="Ontdek uit je bronnen">🔎</button>
         <button class="addbtn" data-act="nieuw" aria-label="Nieuw recept" title="Nieuw recept">+</button>
       </div>
       <div class="chips-rij filters">
@@ -740,7 +752,7 @@ class EtenPanel extends HTMLElement {
     if (f === "check") lijst = lijst.filter((r) => this._teControleren(r));
     if (f.startsWith("tag:")) lijst = lijst.filter((r) => (r.tags || []).includes(f.slice(4)));
     if (!this.recepten.length)
-      return `<div class="leeg"><p>Nog geen recepten.</p><p>Tik op + om er een toe te voegen via een link, geplakte tekst of zelf invullen.</p></div>`;
+      return `<div class="leeg"><p>Nog geen recepten.</p><p>Tik op + om er een toe te voegen via een link, geplakte tekst, een foto of zelf invullen, of op 🔎 om er een te zoeken in je bronnen.</p></div>`;
     if (!lijst.length) return `<p class="leeg">Geen recepten gevonden.</p>`;
     return `<ul class="recepten">${lijst
       .map((r) => {
@@ -749,7 +761,7 @@ class EtenPanel extends HTMLElement {
           <span class="t">${esc(r.naam)}</span>
           <span class="rmeta">${meta}${r.score ? `<span class="score" title="Gemiddeld ${fmtNum(r.score.gem)} van 5">${GEZICHT[Math.round(r.score.gem)]} ${fmtNum(r.score.gem)}</span>` : ""}${
             FB.filter((x) => this._fbVan(r.id, r.naam)[x[0]]).map((x) => `<span title="${x[2]}">${x[1]}</span>`).join("")}</span>
-          <span class="rmeta">${this._herkomstLabel(r)}${(r.kwaliteit || []).length ? `<span class="kwal" title="${esc(r.kwaliteit.join("; "))}">⚠ ${esc(r.kwaliteit[0])}${r.kwaliteit.length > 1 ? ` (+${r.kwaliteit.length - 1})` : ""}</span>` : ""}</span>
+          <span class="rmeta">${this._herkomstLabel(r)}${r.variant_van ? `<span class="herkomst" title="Aangepast van ${esc(r.variant_van_naam || "een ander recept")}">✨ variant</span>` : ""}${(r.kwaliteit || []).length ? `<span class="kwal" title="${esc(r.kwaliteit.join("; "))}">⚠ ${esc(r.kwaliteit[0])}${r.kwaliteit.length > 1 ? ` (+${r.kwaliteit.length - 1})` : ""}</span>` : ""}</span>
         </button></li>`;
       })
       .join("")}</ul>`;
@@ -774,14 +786,20 @@ class EtenPanel extends HTMLElement {
         <h2>${esc(r.naam)}</h2>
         <p class="rmeta">${[r.tijd ? `${r.tijd} min` : "", r.vega ? "🌱 vega" : "", ...(r.tags || [])].filter(Boolean).map(esc).join(" · ")}</p>
         <p class="rmeta">${this._herkomstLabel(r)}${r.bron && /^https?:/i.test(r.bron) ? `<a class="bronlink" href="${esc(r.bron)}" target="_blank" rel="noopener">Origineel recept</a>` : ""}${r.vertaald_uit ? `<span>vertaald</span>` : ""}</p>
+        ${this._variantInfo(r)}
         ${(r.kwaliteit || []).length ? `<div class="kwalblok" role="note"><b>Controleer dit recept</b><ul>${r.kwaliteit.map((k) => `<li>${esc(k)}</li>`).join("")}</ul></div>` : ""}
         ${r.herkomst?.soort === "ai" ? `<p class="hint">Dit recept is door de AI bedacht en komt niet van een van jullie bronnen.</p>` : ""}
+        ${["ai", "onbekend", "web"].includes(r.herkomst?.soort) ? this._herkomstKoppelen(r) : ""}
+        ${this._aanpassingBlok(r)}
         ${sc ? `<p class="scores">${Object.entries(sc.personen).map(([p, s]) => `<span>${esc(p)} ${GEZICHT[Math.round(s)]}</span>`).join("")}<small>${sc.keer}× gegeten</small></p>` : ""}
         <div class="fbrij">${this._fbKnoppen(r.id, r.naam, undefined, true)}</div>
         <div class="knoppen">
           <button class="primary groot" data-act="koken" data-id="${r.id}">Start koken</button>
           <button class="sec-btn" data-act="bewerk" data-id="${r.id}">Bewerken</button>
+          <button class="sec-btn" data-act="raanpas" data-id="${r.id}">✨ Aanpassen met Gemini</button>
         </div>
+        ${this.raanpas?.id === r.id ? this._aanpasKaart(r) : ""}
+        ${r.vorige ? `<p class="hint">Dit recept is aangepast${r.aanpassing ? ` (“${esc(r.aanpassing)}”)` : ""}. <button class="link" data-act="aanpasongedaan" data-id="${r.id}">Ongedaan maken: terug naar de vorige versie</button></p>` : ""}
         <div class="porties"><span>Porties</span>
           <span class="stepper"><button data-act="porties" data-n="-1" aria-label="Minder porties">−</button><span class="n">${fmtNum(porties)}</span>
           <button data-act="porties" data-n="1" aria-label="Meer porties">+</button></span></div>
@@ -798,6 +816,165 @@ class EtenPanel extends HTMLElement {
         <ol class="stappen">${(r.stappen || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>
         ${r.notitie ? `<p class="notitie">${esc(r.notitie)}</p>` : ""}
       </article>`;
+  }
+
+  _variantInfo(r) {
+    const van = r.variant_van ? this.recept(r.variant_van) : null;
+    const varianten = this.recepten.filter((x) => x.variant_van === r.id);
+    if (!r.variant_van && !varianten.length) return "";
+    return `<p class="rmeta varianten">${
+      r.variant_van
+        ? `✨ Variant van ${van ? `<button class="link" data-act="open" data-id="${van.id}">${esc(van.naam)}</button>` : esc(r.variant_van_naam || "een ander recept")}${r.aanpassing ? ` · “${esc(r.aanpassing)}”` : ""}`
+        : ""
+    }${varianten.length ? `Varianten: ${varianten.map((x) => `<button class="link" data-act="open" data-id="${x.id}">${esc(x.naam)}</button>`).join(" · ")}` : ""}</p>`;
+  }
+
+  _herkomstKoppelen(r) {
+    const bronnen = this.d.instellingen.bronnen || [];
+    return `<details class="herkomstkoppel"><summary>Herkomst koppelen of controleren</summary>
+      <p class="hint">Weet je waar dit recept vandaan komt? Koppel het aan een bron, of zoek of het recept in je bronnen staat.</p>
+      <div class="knoppen klein">
+        ${bronnen.length ? `<select id="rbron" aria-label="Bron">${bronnen.map((b) => `<option>${esc(b.naam)}</option>`).join("")}</select>
+        <button class="sec-btn" data-act="rbronzet" data-id="${r.id}">Koppel aan bron</button>` : ""}
+        <button class="sec-btn" data-act="reigen" data-id="${r.id}">Het is een eigen recept</button>
+        <button class="sec-btn" data-act="ontdek" data-vraag="${esc(r.naam)}">🔎 Zoek in mijn bronnen</button>
+      </div></details>`;
+  }
+
+  _aanpasKaart(r) {
+    const w = this.raanpas?.wens || "";
+    return `<section class="kaart aanpaskaart" aria-label="Aanpassen met Gemini">
+      <h3>✨ Aanpassen met Gemini</h3>
+      <p class="hint">Gemini past dit recept aan en laat je eerst zien wat er verandert. Pas daarna bewaar je het, als variant of in plaats van het origineel.</p>
+      <div class="chips-wrap">${SNEL_AANPASSEN.map((t) => `<button class="filt" data-act="raanpassnel" data-t="${esc(t)}">${esc(t)}</button>`).join("")}</div>
+      <label class="veld"><span>Wat moet er anders?</span>
+        <textarea class="raanpas-wens" rows="3" placeholder="bijv. maak het vegetarisch en gebruik wat meer kruiden">${esc(w)}</textarea></label>
+      <div class="knoppen">
+        <button class="primary" data-act="raanpasdoe" data-id="${r.id}">Laat Gemini aanpassen</button>
+        <button class="sec-btn" data-act="raanpasdicht">Annuleren</button>
+      </div></section>`;
+  }
+
+  _aanpassingBlok(r) {
+    const p = this.d.aanpassingen?.[r.id];
+    if (!p) return "";
+    const v = p.verschil || {};
+    const ing = v.ingredienten || { erbij: [], weg: [], gewijzigd: [] };
+    const nieuw = p.recept || {};
+    const geenIng = !ing.erbij.length && !ing.weg.length && !ing.gewijzigd.length;
+    const wijz = (x) => (x ? `<p class="verschil">${esc(x[2] || "")}<s>${esc(x[0] ?? "—")}</s> → <b>${esc(x[1] ?? "—")}</b></p>` : "");
+    return `<section class="voorstelblok" aria-label="Voorstel van Gemini">
+      <p class="sugkop">✨ Voorstel van Gemini voor: “${esc(p.wens)}”</p>
+      ${(p.wijzigingen || []).length ? `<ul class="wijz">${p.wijzigingen.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : ""}
+      ${v.naam ? `<p class="verschil">Naam: <s>${esc(v.naam[0])}</s> → <b>${esc(v.naam[1])}</b></p>` : ""}
+      ${v.porties ? `<p class="verschil">Porties: <s>${esc(v.porties[0] ?? "—")}</s> → <b>${esc(v.porties[1] ?? "—")}</b></p>` : ""}
+      ${v.tijd ? `<p class="verschil">Tijd: <s>${esc(v.tijd[0] ?? "—")} min</s> → <b>${esc(v.tijd[1] ?? "—")} min</b></p>` : ""}
+      <h3>Ingrediënten</h3>
+      <div class="diff">
+        ${ing.gewijzigd.map((g) => `<div class="d-wijzig">↔ <s>${esc(g.van)}</s> → ${esc(g.naar)}</div>`).join("")}
+        ${ing.erbij.map((t) => `<div class="d-erbij">+ ${esc(t)}</div>`).join("")}
+        ${ing.weg.map((t) => `<div class="d-weg">− ${esc(t)}</div>`).join("")}
+        ${geenIng ? `<p class="hint">De ingrediënten blijven gelijk.</p>` : ""}
+      </div>
+      <details open><summary>Nieuwe bereiding (${(nieuw.stappen || []).length} stappen, gewijzigde stappen gemarkeerd)</summary>
+        <ol class="stappen">${(nieuw.stappen || []).map((st, i) => `<li class="${v.stappen_nieuw?.[i] ? "nw" : ""}">${esc(st)}</li>`).join("")}</ol></details>
+      ${(p.kwaliteit || []).length ? `<div class="kwalblok" role="note"><b>Let op</b><ul>${p.kwaliteit.map((k) => `<li>${esc(k)}</li>`).join("")}</ul></div>` : ""}
+      <div class="knoppen">
+        <button class="primary" data-act="aanpastoe" data-id="${r.id}" data-modus="variant">Opslaan als variant</button>
+        <button class="sec-btn" data-act="aanpastoe" data-id="${r.id}" data-modus="vervang">Origineel vervangen</button>
+        <button class="sec-btn" data-act="raanpasnogmaals" data-id="${r.id}">Opnieuw, met andere wens</button>
+        <button class="wis" data-act="aanpasweg" data-id="${r.id}">Weggooien</button>
+      </div></section>`;
+  }
+
+  // ------------------------------------------------------------------ bronnen
+  _bronnenView() {
+    const bronnen = this.d.instellingen.bronnen || [];
+    const info = this.d.bronnen_info || {};
+    const n = this.bronNieuw ||= { type: "website", url: "", naam: "", notitie: "", check: null };
+    const kaart = (b, i) => {
+      const inf = info[b.naam] || { recepten: 0 };
+      const adres = b.type === "website" ? `<a href="https://${esc(b.domein + (b.pad || ""))}" target="_blank" rel="noopener">${esc(b.domein + (b.pad || ""))}</a>` : "";
+      if (this.bronEdit === i)
+        return `<div class="kaart bron" data-i="${i}">
+          <label class="veld"><span>Naam</span><input class="be-naam" value="${esc(b.naam)}"></label>
+          ${b.type === "website" ? `<label class="veld"><span>Adres (eventueel met pad)</span><input class="be-adres" value="${esc(b.domein + (b.pad || ""))}" inputmode="url"></label>` : ""}
+          <label class="veld"><span>Notitie</span><input class="be-notitie" value="${esc(b.notitie || "")}" placeholder="bijv. boek uit de bibliotheek"></label>
+          <div class="knoppen"><button class="primary" data-act="bronopslaan" data-i="${i}">Opslaan</button>
+            <button class="sec-btn" data-act="bronbewerkdicht">Annuleren</button></div></div>`;
+      return `<div class="kaart bron ${b.aan === false ? "uit" : ""}">
+        <div class="bronkop"><b>${esc(b.naam)}</b><span class="typebadge">${esc(BRON_TYPE[b.type] || b.type)}</span><span class="vul"></span>
+          <label class="check klein" title="Uit: deze bron doet niet mee bij Ontdek"><input type="checkbox" data-bronaan="${i}" ${b.aan === false ? "" : "checked"}> aan</label></div>
+        ${adres ? `<p class="rmeta">${adres}</p>` : ""}
+        <p class="rmeta"><span>${inf.recepten} ${inf.recepten === 1 ? "recept" : "recepten"}</span>${inf.score ? `<span class="score">${GEZICHT[Math.round(inf.score)]} gem. ${fmtNum(inf.score)}</span>` : ""}${
+          inf.wel ? `<span>👍 ${inf.wel}</span>` : ""}${inf.niet ? `<span>👎 ${inf.niet}</span>` : ""}</p>
+        ${b.notitie ? `<p class="hint">${esc(b.notitie)}</p>` : ""}
+        <div class="knoppen klein">
+          ${b.type === "website" ? `<button class="sec-btn" data-act="ontdek" data-bron="${esc(b.naam)}">🔎 Zoek recepten</button>` : `<button class="sec-btn" data-act="nieuw" data-bron="${esc(b.naam)}">📷 Recept uit foto</button>`}
+          <button class="sec-btn" data-act="bronbewerk" data-i="${i}">Bewerken</button>
+          <span class="vul"></span>
+          <button class="wis klein" data-act="bronweg" data-i="${i}">Verwijderen</button>
+        </div></div>`;
+    };
+    const c = n.check;
+    return `<button class="terug" data-act="terug">‹ Terug</button>
+      <h2 class="kop2">Bronnen</h2>
+      <p class="hint">De koks, sites en boeken waar jullie recepten vandaan komen. Bij elk recept zie je de herkomst; bij Ontdek (🔎) zoek je in de websites die hier aan staan.</p>
+      ${bronnen.length ? bronnen.map(kaart).join("") : `<p class="leeg">Nog geen bronnen. Voeg er hieronder een toe.</p>`}
+      <section class="kaart" aria-label="Bron toevoegen">
+        <h3>Bron toevoegen</h3>
+        <label class="veld"><span>Soort</span>
+          <select id="bn-type">${Object.entries(BRON_TYPE).map(([k, t]) => `<option value="${k}" ${n.type === k ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+        ${n.type === "website" ? `
+          <label class="veld"><span>Adres van de site (of van een deel ervan)</span>
+            <input id="bn-url" type="url" inputmode="url" placeholder="https://…" value="${esc(n.url)}"></label>
+          <button class="sec-btn" data-act="broncheck">Controleer de site</button>
+          ${c ? `<div class="${c.leesbaar ? "melding" : "kwalblok"}" role="status"><b>${esc(c.naam)}</b> (${esc(c.domein + (c.pad || ""))})<br>${esc(c.advies)}</div>` : ""}` : ""}
+        <label class="veld"><span>Naam</span><input id="bn-naam" value="${esc(n.naam || (c ? c.naam : ""))}" placeholder="${n.type === "boek" ? "bijv. Ottolenghi Simple" : "bijv. Brenda Kookt"}"></label>
+        <label class="veld"><span>Notitie (optioneel)</span><input id="bn-notitie" value="${esc(n.notitie)}"></label>
+        <button class="primary" data-act="bronnieuw">Bron toevoegen</button>
+        ${n.type !== "website" ? `<p class="hint">Recepten uit een boek voeg je toe met een foto van de pagina (bij + → Foto van een recept) en kies daar deze bron.</p>` : ""}
+      </section>`;
+  }
+
+  async _bronnenOpslaan(lijst, bezig = "Bronnen opslaan…") {
+    return this._do({ type: "boodschappen/eten_bronnen", bronnen: lijst }, bezig);
+  }
+
+  // ------------------------------------------------------------------ ontdek
+  _ontdekView() {
+    const o = this.ont ||= { bron: "", vraag: "", res: null, nota: "" };
+    const bronnen = (this.d.instellingen.bronnen || []).filter((b) => b.type === "website" && b.aan !== false);
+    const lijst = o.res
+      ? o.res.length
+        ? `<ul class="ontdek">${o.res
+            .map(
+              (x, i) => `<li class="orij ${x.fout ? "mislukt" : ""}">
+            <div class="otekst"><span class="t">${esc(x.titel)}</span>
+              <small>${esc(x.bron)}${x.reden ? ` · ${esc(x.reden)}` : ""}</small>
+              ${x.fout ? `<small class="warn">${esc(x.fout)}</small>` : ""}</div>
+            <div class="knoppen klein">
+              <a class="sec-btn" href="${esc(x.url)}" target="_blank" rel="noopener" aria-label="Bekijk ${esc(x.titel)} op de site">↗ Bekijk</a>
+              ${x.toegevoegd ? `<button class="sec-btn" data-act="open" data-id="${esc(x.toegevoegd)}">✓ Toegevoegd · open</button>`
+                : x.fout ? "" : `<button class="primary klein" data-act="ontvoeg" data-i="${i}">Toevoegen</button>`}
+            </div></li>`
+            )
+            .join("")}</ul>${o.nota ? `<p class="hint">${esc(o.nota)}</p>` : ""}`
+        : `<p class="leeg">Niets gevonden. Probeer een ander woord, of laat Gemini kiezen.</p>`
+      : "";
+    return `<button class="terug" data-act="terug">‹ Terug</button>
+      <h2 class="kop2">Ontdek uit je bronnen</h2>
+      ${bronnen.length ? "" : `<p class="melding">Er staat geen website als bron aan. <button class="link" data-act="bronnen">Bronnen beheren</button></p>`}
+      <section class="kaart">
+        <label class="veld"><span>Bron</span>
+          <select id="ont-bron"><option value="">Alle bronnen</option>${bronnen.map((b) => `<option ${o.bron === b.naam ? "selected" : ""}>${esc(b.naam)}</option>`).join("")}</select></label>
+        <label class="veld"><span>Zoekwoord of wens</span>
+          <input id="ont-vraag" type="search" placeholder="bijv. pompoen, snelle pasta, iets met linzen" value="${esc(o.vraag)}"></label>
+        <div class="knoppen"><button class="primary" data-act="ontzoek">Zoeken</button>
+          <button class="sec-btn" data-act="ontai" title="Gemini kiest op basis van je wens, het gezin, de voorraad en de aanbiedingen">✨ Laat Gemini kiezen</button></div>
+        <p class="hint">Zoeken kijkt naar de titels op de sites (bij Ottolenghi zijn die Engels). Zonder zoekwoord krijg je een willekeurige greep. Gemini kiest ook met jullie voorkeuren, de voorraad en de aanbiedingen, ook in een andere taal.</p>
+      </section>
+      ${lijst}`;
   }
 
   _kokenView(id) {
@@ -865,24 +1042,62 @@ class EtenPanel extends HTMLElement {
   }
 
   _nieuwView() {
+    const bronnen = this.d.instellingen.bronnen || [];
+    const opties = (gekozen) => `<option value="">— geen bron —</option>${bronnen.map((b) => `<option ${gekozen === b.naam ? "selected" : ""}>${esc(b.naam)}</option>`).join("")}`;
+    const fotos = this._fotos || [];
     return `<button class="terug" data-act="terug">‹ Terug</button>
       <h2 class="kop2">Nieuw recept</h2>
+      <div class="knoppen klein">
+        <button class="sec-btn" data-act="ontdek">🔎 Zoek in je bronnen</button>
+        <button class="sec-btn" data-act="bronnen">📚 Bronnen beheren</button>
+      </div>
       <section class="kaart">
         <h3>Van een website</h3>
         <label class="veld"><span>Link naar het recept</span><input id="imp-url" type="url" inputmode="url" placeholder="https://…"></label>
         <button class="primary" data-act="importeer" data-bron="url">Ophalen</button>
       </section>
       <section class="kaart">
+        <h3>Foto van een recept</h3>
+        <p class="hint">Bijvoorbeeld een pagina uit een kookboek. Loopt het recept over meer pagina's, kies dan er tot 4 tegelijk. De foto wordt alleen gelezen en niet bewaard.</p>
+        <label class="veld"><span>Foto('s) maken of kiezen</span><input id="imp-foto" type="file" accept="image/*" multiple></label>
+        ${fotos.length ? `<p class="melding" role="status">${fotos.length} ${fotos.length === 1 ? "foto" : "foto's"} klaar om te lezen.</p>` : ""}
+        ${this._fotoFout ? `<p class="fout" role="alert">${esc(this._fotoFout)}</p>` : ""}
+        <label class="veld"><span>Uit welke bron? (optioneel)</span><select id="imp-bron-foto">${opties(this._fotoBron || "")}</select></label>
+        <button class="primary" data-act="importeer" data-bron="foto" ${fotos.length ? "" : "disabled"}>Omzetten</button>
+      </section>
+      <section class="kaart">
         <h3>Tekst plakken</h3>
         <label class="veld"><span>Ingrediënten en bereiding, zoals je ze hebt</span><textarea id="imp-tekst" rows="6"></textarea></label>
+        <label class="veld"><span>Uit welke bron? (optioneel)</span><select id="imp-bron-tekst">${opties("")}</select></label>
         <button class="primary" data-act="importeer" data-bron="tekst">Omzetten</button>
       </section>
       <section class="kaart">
         <h3>Zelf invullen</h3>
         <button class="sec-btn" data-act="handmatig">Leeg recept</button>
       </section>
-      <p class="hint">Van een website nemen we ingrediënten en bereiding letterlijk over; de AI-taak koppelt alleen de ingrediënten aan je Grocy-producten en vertaalt als het recept niet Nederlands is. Ontbreekt er iets, dan zie je dat bij het recept.</p>
-      <p class="hint">Jullie bronnen: ${(this.d.instellingen.bronnen || []).map((b) => `<a href="https://${esc(b.domein + (b.pad || ""))}" target="_blank" rel="noopener">${esc(b.naam)}</a>`).join(" · ") || "nog geen (zie instellingen)"}</p>`;
+      <p class="hint">Van een website nemen we ingrediënten en bereiding letterlijk over; Gemini koppelt alleen de ingrediënten aan je Grocy-producten en vertaalt als het recept niet Nederlands is. Ontbreekt er iets, dan zie je dat bij het recept.</p>
+      <p class="hint">Jullie bronnen: ${bronnen.map((b) => (b.domein ? `<a href="https://${esc(b.domein + (b.pad || ""))}" target="_blank" rel="noopener">${esc(b.naam)}</a>` : esc(b.naam))).join(" · ") || "nog geen"}</p>`;
+  }
+
+  // Foto verkleinen (max 1600 px, JPEG) zodat hij snel en binnen de berichtgrootte van Home Assistant blijft.
+  async _fotoNaarData(file) {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((ok, fout) => {
+        const i = new Image();
+        i.onload = () => ok(i);
+        i.onerror = () => fout(new Error("Dit bestand is geen foto die ik kan lezen."));
+        i.src = url;
+      });
+      const f = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(img.naturalWidth * f));
+      c.height = Math.max(1, Math.round(img.naturalHeight * f));
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      return c.toDataURL("image/jpeg", 0.82);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
   }
 
   _instView() {
@@ -969,9 +1184,8 @@ class EtenPanel extends HTMLElement {
           <textarea data-pad="huisregels" rows="4">${esc(e.huisregels || "")}</textarea></label>
 
         <h3>Bronnen voor recepten</h3>
-        <p class="hint">De koks en sites waar jullie recepten vandaan moeten komen. Eén per regel: naam | adres van de site (eventueel met pad).</p>
-        <label class="veld"><span>Bronnen</span>
-          <textarea data-pad="bronnen_tekst" rows="5">${esc(e.bronnen_tekst ?? (e.bronnen || []).map((b) => `${b.naam} | ${b.domein}${b.pad || ""}`).join("\n"))}</textarea></label>
+        <p class="hint">De koks, sites en boeken waar jullie recepten vandaan komen staan nu op een eigen scherm.</p>
+        <button class="sec-btn" data-act="bronnen">📚 Bronnen beheren</button>
 
         <h3>Agenda en AI</h3>
         <label class="veld"><span>Agenda voor de maaltijden</span>
@@ -999,6 +1213,11 @@ class EtenPanel extends HTMLElement {
 
   // ------------------------------------------------------------------ events
   _input(e) {
+    if (e.target.classList?.contains("raanpas-wens") && this.raanpas) this.raanpas.wens = e.target.value;
+    if (e.target.id === "ont-vraag" && this.ont) this.ont.vraag = e.target.value;
+    if (e.target.id === "bn-url" && this.bronNieuw) this.bronNieuw.url = e.target.value;
+    if (e.target.id === "bn-naam" && this.bronNieuw) this.bronNieuw.naam = e.target.value;
+    if (e.target.id === "bn-notitie" && this.bronNieuw) this.bronNieuw.notitie = e.target.value;
     if (e.target.id === "zoek") {
       this.zoek = e.target.value;
       this._zoekFocus = true;
@@ -1008,6 +1227,38 @@ class EtenPanel extends HTMLElement {
 
   async _change(e) {
     const t = e.target;
+    if (t.id === "ont-bron" && this.ont) {
+      this.ont.bron = t.value;
+      return;
+    }
+    if (t.id === "imp-bron-foto") {
+      this._fotoBron = t.value;
+      return;
+    }
+    if (t.id === "bn-type" && this.bronNieuw) {
+      this.bronNieuw = { type: t.value, url: "", naam: "", notitie: "", check: null };
+      return this._render();
+    }
+    if (t.id === "imp-foto") {
+      this._fotoFout = "";
+      try {
+        const files = [...t.files].slice(0, 4);
+        this._fotos = await Promise.all(files.map((f) => this._fotoNaarData(f)));
+        if (this._fotos.reduce((n, x) => n + x.length, 0) > 3_000_000) {
+          this._fotos = [];
+          this._fotoFout = "De foto's zijn samen te groot. Kies er minder, of fotografeer iets verder weg.";
+        }
+      } catch (err) {
+        this._fotos = [];
+        this._fotoFout = err.message || "Foto lezen mislukt.";
+      }
+      return this._render();
+    }
+    if (t.dataset.bronaan !== undefined) {
+      const lijst = JSON.parse(JSON.stringify(this.d.instellingen.bronnen || []));
+      lijst[Number(t.dataset.bronaan)].aan = t.checked;
+      return this._bronnenOpslaan(lijst);
+    }
     if (t.dataset.pad !== undefined && this.inst) {
       if (t.dataset.dag !== undefined) {
         const huidig = new Set(this._leesPad(t.dataset.pad) || []);
@@ -1282,6 +1533,7 @@ class EtenPanel extends HTMLElement {
         this.filter = b.dataset.f;
         return this._render();
       case "open":
+        this._terugNaar = null;
         this.view = { soort: "recept", id: b.dataset.id };
         this.porties = null;
         this._scrollTop = true;
@@ -1289,7 +1541,15 @@ class EtenPanel extends HTMLElement {
       case "terug":
         if (this.view?.soort === "instellingen") this.inst = null;
         if (this.view?.soort === "plannen") this.plan = null;
-        this.view = this.view?.soort === "bewerk" && this.view.id ? { soort: "recept", id: this.view.id } : null;
+        this._fotos = null;
+        this._fotoFout = "";
+        this.raanpas = null;
+        this.bronEdit = null;
+        if (["bronnen", "ontdek", "nieuw"].includes(this.view?.soort) && this._terugNaar) {
+          this.bronEdit = null;
+          this.view = this._terugNaar;
+          this._terugNaar = null;
+        } else this.view = this.view?.soort === "bewerk" && this.view.id ? { soort: "recept", id: this.view.id } : null;
         this._scrollTop = true;
         return this._render();
       case "porties": {
@@ -1316,9 +1576,189 @@ class EtenPanel extends HTMLElement {
         this._scrollTop = true;
         return this._render();
       case "nieuw":
+        this._fotoBron = b.dataset.bron || "";
+        this._fotos = null;
+        this._fotoFout = "";
+        this._terugNaar = this.view?.soort === "bronnen" ? this.view : null;
         this.view = { soort: "nieuw" };
         this._scrollTop = true;
         return this._render();
+      case "bronnen":
+        this._terugNaar = this.view && this.view.soort !== "bronnen" ? this.view : this._terugNaar;
+        this.view = { soort: "bronnen" };
+        this.bronEdit = null;
+        this._scrollTop = true;
+        return this._render();
+      case "bronbewerk":
+        this.bronEdit = Number(b.dataset.i);
+        return this._render();
+      case "bronbewerkdicht":
+        this.bronEdit = null;
+        return this._render();
+      case "bronopslaan": {
+        const i = Number(b.dataset.i);
+        const kaart = b.closest("[data-i]");
+        const lijst = JSON.parse(JSON.stringify(this.d.instellingen.bronnen || []));
+        const bron = lijst[i];
+        const naam = kaart.querySelector(".be-naam").value.trim();
+        if (!naam) {
+          this.err = "Geef de bron een naam.";
+          return this._render();
+        }
+        bron.oud = bron.naam;
+        bron.naam = naam;
+        if (bron.type === "website") {
+          const adres = kaart.querySelector(".be-adres").value.trim();
+          if (!adres) {
+            this.err = "Een website heeft een adres nodig.";
+            return this._render();
+          }
+          bron.domein = adres;
+          delete bron.pad;
+        }
+        bron.notitie = kaart.querySelector(".be-notitie").value.trim();
+        this.bronEdit = null;
+        return this._bronnenOpslaan(lijst);
+      }
+      case "bronweg": {
+        const i = Number(b.dataset.i);
+        const bron = (this.d.instellingen.bronnen || [])[i];
+        const aantal = (this.d.bronnen_info?.[bron.naam] || {}).recepten || 0;
+        if (b.dataset.zeker !== "1") {
+          b.dataset.zeker = "1";
+          b.textContent = aantal ? `Zeker? ${aantal} recepten verliezen hun herkomst` : "Zeker weggooien?";
+          return;
+        }
+        const lijst = JSON.parse(JSON.stringify(this.d.instellingen.bronnen || []));
+        lijst.splice(i, 1);
+        return this._bronnenOpslaan(lijst, "Bron verwijderen…");
+      }
+      case "broncheck": {
+        const n = this.bronNieuw;
+        const url = (root.querySelector("#bn-url")?.value || "").trim();
+        if (!url) {
+          this.err = "Plak eerst het adres van de site.";
+          return this._render();
+        }
+        n.url = url;
+        n.check = null;
+        const res = await this._do({ type: "boodschappen/eten_bron_check", url }, "Site bekijken (even geduld, dit kan een halve minuut duren)…");
+        if (res && typeof res === "object") {
+          n.check = res;
+          if (!n.naam) n.naam = res.naam;
+        }
+        return this._render();
+      }
+      case "bronnieuw": {
+        const n = this.bronNieuw;
+        const naam = (root.querySelector("#bn-naam")?.value || "").trim();
+        const notitie = (root.querySelector("#bn-notitie")?.value || "").trim();
+        const lijst = JSON.parse(JSON.stringify(this.d.instellingen.bronnen || []));
+        const nieuw = { naam, type: n.type, notitie, aan: true };
+        if (n.type === "website") {
+          const c = n.check;
+          const url = (root.querySelector("#bn-url")?.value || "").trim();
+          if (!url) {
+            this.err = "Plak het adres van de site.";
+            return this._render();
+          }
+          nieuw.domein = c ? c.domein : url;
+          nieuw.pad = c ? c.pad : "";
+        }
+        if (!naam) {
+          this.err = "Geef de bron een naam.";
+          return this._render();
+        }
+        if (lijst.some((x) => x.naam.toLowerCase() === naam.toLowerCase())) {
+          this.err = "Er is al een bron met die naam.";
+          return this._render();
+        }
+        lijst.push(nieuw);
+        this.bronNieuw = null;
+        await this._bronnenOpslaan(lijst, "Bron toevoegen…");
+        if (!this.err) this.melding = `${naam} is toegevoegd.`;
+        return this._render();
+      }
+      case "ontdek":
+        this._terugNaar = this.view && this.view.soort !== "ontdek" ? this.view : this._terugNaar;
+        this.ont = { bron: b.dataset.bron || "", vraag: b.dataset.vraag || "", res: null, nota: "" };
+        this.view = { soort: "ontdek" };
+        this._scrollTop = true;
+        this._render();
+        if (this.ont.vraag) return this._ontdekZoek(false);
+        return;
+      case "ontzoek":
+        return this._ontdekZoek(false);
+      case "ontai":
+        return this._ontdekZoek(true);
+      case "ontvoeg": {
+        const x = this.ont.res[Number(b.dataset.i)];
+        const id = await this._do({ type: "boodschappen/eten_import", url: x.url }, `${x.titel} ophalen…`);
+        if (typeof id === "string") x.toegevoegd = id;
+        else x.fout = this.err || "Dit lukte niet.";
+        this.err = "";
+        return this._render();
+      }
+      case "rbronzet": {
+        const bron = root.querySelector("#rbron")?.value;
+        return this._do({ type: "boodschappen/eten_recept_bron", recept_id: b.dataset.id, bron_naam: bron });
+      }
+      case "reigen":
+        return this._do({ type: "boodschappen/eten_recept_bron", recept_id: b.dataset.id, bron_naam: null, eigen: true });
+      case "raanpas":
+        this.raanpas = { id: b.dataset.id, wens: "" };
+        this._render();
+        root.querySelector(".raanpas-wens")?.focus();
+        return;
+      case "raanpasdicht":
+        this.raanpas = null;
+        return this._render();
+      case "raanpassnel": {
+        const veld = root.querySelector(".raanpas-wens");
+        const huidig = (veld?.value || "").trim();
+        const t = b.dataset.t;
+        this.raanpas.wens = huidig ? `${huidig.replace(/[.,;]\s*$/, "")}, ${t.toLowerCase()}` : t;
+        this._render();
+        const nieuw = root.querySelector(".raanpas-wens");
+        nieuw?.focus();
+        nieuw?.setSelectionRange(nieuw.value.length, nieuw.value.length);
+        return;
+      }
+      case "raanpasdoe": {
+        const wens = (root.querySelector(".raanpas-wens")?.value || "").trim();
+        if (!wens) {
+          this.err = "Vertel Gemini wat er anders moet, bijvoorbeeld 'maak het vegetarisch'.";
+          return this._render();
+        }
+        this.raanpas = null;
+        await this._do({ type: "boodschappen/eten_aanpassen", recept_id: b.dataset.id, wens }, "Gemini past het recept aan (dit duurt even)…");
+        this._scrollTop = !this.err;
+        return this._render();
+      }
+      case "raanpasnogmaals": {
+        const p = this.d.aanpassingen?.[b.dataset.id];
+        this.raanpas = { id: b.dataset.id, wens: p?.wens || "" };
+        return this._render();
+      }
+      case "aanpasweg":
+        return this._do({ type: "boodschappen/eten_aanpassing_weg", recept_id: b.dataset.id });
+      case "aanpastoe": {
+        if (b.dataset.modus === "vervang" && b.dataset.zeker !== "1") {
+          b.dataset.zeker = "1";
+          b.textContent = "Zeker? Het origineel wordt vervangen";
+          return;
+        }
+        const id = await this._do({ type: "boodschappen/eten_aanpassing_toepassen", recept_id: b.dataset.id, modus: b.dataset.modus }, "Opslaan…");
+        if (typeof id === "string") {
+          this.view = { soort: "recept", id };
+          this.melding = b.dataset.modus === "variant" ? "Opgeslagen als nieuwe variant. Het origineel is ongewijzigd." : "Recept aangepast. Je kunt het ongedaan maken onder aan de knoppen.";
+          this._scrollTop = true;
+          this._render();
+        }
+        return;
+      }
+      case "aanpasongedaan":
+        return this._do({ type: "boodschappen/eten_aanpassing_ongedaan", recept_id: b.dataset.id }, "Vorige versie terugzetten…");
       case "handmatig":
         this._concept = { naam: "", porties: 4, ingredienten: [], stappen: [] };
         this.view = { soort: "bewerk", id: null };
@@ -1393,13 +1833,19 @@ class EtenPanel extends HTMLElement {
       case "importeer": {
         const url = root.querySelector("#imp-url").value.trim();
         const tekst = root.querySelector("#imp-tekst").value.trim();
-        const msg = b.dataset.bron === "url" ? { url, tekst: null } : { url: null, tekst };
-        if (!(msg.url || msg.tekst)) {
-          this.err = b.dataset.bron === "url" ? "Plak eerst een link." : "Plak eerst een recept.";
+        let msg;
+        if (b.dataset.bron === "foto") {
+          msg = { url: null, tekst: null, fotos: this._fotos || [], bron_naam: root.querySelector("#imp-bron-foto")?.value || null };
+        } else if (b.dataset.bron === "url") msg = { url, tekst: null };
+        else msg = { url: null, tekst, bron_naam: root.querySelector("#imp-bron-tekst")?.value || null };
+        if (!(msg.url || msg.tekst || (msg.fotos || []).length)) {
+          this.err = b.dataset.bron === "url" ? "Plak eerst een link." : b.dataset.bron === "foto" ? "Kies eerst een foto." : "Plak eerst een recept.";
           return this._render();
         }
-        const id = await this._do({ type: "boodschappen/eten_import", ...msg }, "Recept ophalen en omzetten…");
+        const id = await this._do({ type: "boodschappen/eten_import", ...msg },
+          b.dataset.bron === "foto" ? "Gemini leest de foto (dit duurt even)…" : "Recept ophalen en omzetten…");
         if (typeof id === "string") {
+          this._fotos = null;
           this.view = { soort: "bewerk", id };
           this.melding = "Recept omgezet. Controleer het even en sla op.";
           this._scrollTop = true;
@@ -1421,8 +1867,7 @@ class EtenPanel extends HTMLElement {
         e.profielen = (e.profielen || []).filter((p) => (p.naam || "").trim());
         await this._do({ type: "boodschappen/eten_instellingen", instellingen: {
           agenda: e.agenda || null, tijd: e.tijd || "17:00", duur: Number(e.duur || 60), huisregels: e.huisregels || "",
-          ai: e.ai || null, profielen: e.profielen, weekdagen: e.weekdagen, stijl: e.stijl, afwisseling: e.afwisseling,
-          bronnen: e.bronnen_tekst !== undefined ? e.bronnen_tekst : e.bronnen } });
+          ai: e.ai || null, profielen: e.profielen, weekdagen: e.weekdagen, stijl: e.stijl, afwisseling: e.afwisseling } });
         if (!this.err) {
           this.inst = null;
           this.view = null;
@@ -1432,6 +1877,23 @@ class EtenPanel extends HTMLElement {
         return;
       }
     }
+  }
+
+  async _ontdekZoek(ai) {
+    const root = this.shadowRoot;
+    const o = this.ont;
+    o.bron = root.querySelector("#ont-bron")?.value ?? o.bron;
+    o.vraag = (root.querySelector("#ont-vraag")?.value ?? o.vraag).trim();
+    o.res = null;
+    o.nota = "";
+    const res = await this._do({ type: "boodschappen/eten_bron_zoek", bron: o.bron || null, vraag: o.vraag, ai },
+      ai ? "Gemini kiest recepten (dit duurt even)…" : "Zoeken in de bronnen (de eerste keer duurt het even)…");
+    if (res && typeof res === "object") {
+      o.res = res.resultaten || [];
+      o.nota = res.nota || "";
+    }
+    this._scrollTop = false;
+    return this._render();
   }
 
   async _wakeAan() {
@@ -1728,6 +2190,45 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; flex: 1; }
 .wdrij select, .wdrij input { min-height: 40px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--rand); font-size: 14px; min-width: 0; width: 100%;
   background: var(--primary-background-color); color: var(--primary-text-color); }
 @media (max-width: 600px) { .wdrij { grid-template-columns: 26px 1fr 1fr 50px 50px; } .wdrij .wdnotitie { grid-column: 2 / -1; } .wdrij { padding-bottom: 6px; border-bottom: 1px dashed var(--rand); } }
+
+/* aanpassen met Gemini, bronnen, ontdek */
+.addbtn.zoekbtn { background: var(--zacht); color: var(--primary-text-color); font-size: 22px; }
+.aanpaskaart { border: 1px solid color-mix(in srgb, var(--acc) 40%, transparent); }
+.voorstelblok { margin: 14px 0; padding: 12px 14px; border-radius: 14px; display: grid; gap: 6px;
+  background: color-mix(in srgb, var(--acc) 10%, var(--card-background-color)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--acc) 35%, transparent) inset; }
+.voorstelblok h3 { margin: 8px 0 2px; }
+.wijz { margin: 2px 0 4px; padding-left: 20px; }
+.wijz li { padding: 2px 0; }
+.verschil { margin: 0; font-size: 14px; }
+.verschil s { color: var(--secondary-text-color); }
+.diff { display: grid; gap: 4px; }
+.diff > div { padding: 6px 10px; border-radius: 8px; font-size: 15px; }
+.d-erbij { background: color-mix(in srgb, var(--success-color, #2e7d32) 18%, transparent); }
+.d-weg { background: color-mix(in srgb, var(--error-color, #c62828) 16%, transparent); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--error-color, #c62828) 60%, transparent); }
+.d-wijzig { background: color-mix(in srgb, var(--warning-color, #f9a825) 20%, transparent); }
+.d-wijzig s { color: var(--secondary-text-color); }
+.voorstelblok details summary { cursor: pointer; padding: 8px 0; color: var(--primary-color); }
+.stappen li.nw { background: color-mix(in srgb, var(--success-color, #2e7d32) 14%, transparent); border-radius: 8px; }
+.varianten { gap: 4px 6px; align-items: center; }
+.varianten .link { padding: 0; }
+.herkomstkoppel { margin: 8px 0; font-size: 14px; }
+.herkomstkoppel summary { cursor: pointer; padding: 6px 0; color: var(--primary-color); }
+.herkomstkoppel select, .knoppen.klein select { min-height: 38px; border-radius: 8px; border: 1px solid var(--rand);
+  background: var(--primary-background-color); color: var(--primary-text-color); padding: 0 8px; font-size: 14px; }
+.bron.uit { opacity: .6; }
+.bronkop { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bronkop b { font-size: 17px; }
+.typebadge { font-size: 12px; padding: 1px 8px; border-radius: 999px; background: var(--zacht); color: var(--secondary-text-color); }
+.bron .rmeta a, .ontdek a.sec-btn { color: var(--primary-color); }
+.ontdek { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.orij { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px;
+  border-radius: 12px; background: var(--card-background-color); box-shadow: 0 0 0 1px var(--rand) inset; }
+.orij.mislukt { opacity: .7; }
+.orij .otekst { flex: 1; min-width: 200px; }
+.orij .knoppen { margin: 0; }
+.orij a.sec-btn { display: inline-flex; align-items: center; text-decoration: none; }
+.otekst small.warn { color: var(--warning-color, #b26a00); }
+.primary.klein { min-height: 40px; padding: 0 16px; font-size: 14px; }
 @media (min-width: 700px) {
   .main { padding: 14px 24px 96px; }
   .main > *, .bar > * { max-width: 720px; margin-left: auto; margin-right: auto; }
