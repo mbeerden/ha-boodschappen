@@ -113,13 +113,17 @@ def namen_in(item: dict, namen: list[str]) -> list[str]:
 def score_item(titel: str, item: dict | None, woorden: list[str]) -> int:
     """Hoeveel zoekwoorden in de titel of de ingrediënten staan (titel telt dubbel)."""
     t = _woorden(titel)
-    i = _woorden(" ".join((item or {}).get("i") or []))
+    t_plat = _kort(_norm(titel))
+    i_tekst = " ".join((item or {}).get("i") or [])
+    i = _woorden(i_tekst)
+    i_plat = _kort(_norm(i_tekst))
     n = 0
     for w in woorden:
-        s = _stam(_kort(w))
-        if s in t:
+        k = _kort(w)
+        s = _stam(k)
+        if s in t or (len(k) >= 4 and k in t_plat):  # ook samenstellingen: 'soep' in 'linzensoep'
             n += 2
-        elif s in i:
+        elif s in i or (len(k) >= 4 and k in i_plat):
             n += 1
     return n
 

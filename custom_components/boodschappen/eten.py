@@ -872,56 +872,60 @@ class Eten:
         sleutels = {self._bron_sleutel(b) for b in self.inst["bronnen"] if b["type"] == "website"}
         for weg in [k for k in self.idx if k not in sleutels]:
             self.idx.pop(weg)  # bron verwijderd
-        for b in bronnen:
-            sl = self._bron_sleutel(b)
-            e = self.idx.setdefault(sl, {"naam": b["naam"], "links": [], "ts": 0, "klaar": False, "d": {}})
-            e["naam"] = b["naam"]
-            if not e["links"] or time.time() - (e.get("ts") or 0) > bix.LINKS_VERNIEUW:
-                e["bezig"] = "links"
-                try:
-                    sm = await self._sitemap_start(b)
-                    for _ in range(40):
-                        await self._sitemap_verder(b, sm, 60, max_sitemaps=80)
-                        if sm["klaar"] or sm["gelezen"] >= 80:
-                            break
-                    if sm["links"]:
-                        sm["klaar"] = True
-                        self._sitemaps[sl] = sm
-                        e.update({"links": sm["links"][:bix.LINKS_MAX], "klaar": True, "melding": None})
-                    else:
-                        e["melding"] = "Geen receptlinks gevonden in de sitemap"
-                except Exception as err:  # noqa: BLE001
-                    e["melding"] = f"Sitemap niet te lezen: {err}"
-                e["ts"] = time.time()
-                self._index_opslaan()
-            todo = bix.te_indexeren(e["links"], e["d"], time.time())
-            if not todo:
-                e["bezig"] = None
-                continue
-            e["bezig"] = "recepten"
-            fouten = 0
-            for n, u in enumerate(todo, 1):
-                try:
-                    page = await self._haal(u, 3_000_000)
-                    item = bix.index_item(page, html_naar_tekst(page)[:20000])
-                    e["d"][u] = item or bix.GEEN_RECEPT
-                    fouten = 0
-                except asyncio.CancelledError:
-                    self._index_opslaan()
-                    raise
-                except Exception as err:  # noqa: BLE001
-                    e["d"][u] = {"fout": str(err)[:80], "ts": time.time()}
-                    fouten += 1
-                    if fouten >= bix.MAX_FOUTEN_OP_RIJ:
-                        e["melding"] = f"De site weigert pagina's ({err}); later opnieuw"
+        # elke site tegelijk (per site blijft het rustig: één pagina per paar seconden)
+        await asyncio.gather(*(self._index_bron(b) for b in bronnen))
+
+    async def _index_bron(self, b: dict) -> None:
+        """Eén bron bijwerken: linklijst (als die oud is) en dan de receptgegevens."""
+        sl = self._bron_sleutel(b)
+        e = self.idx.setdefault(sl, {"naam": b["naam"], "links": [], "ts": 0, "klaar": False, "d": {}})
+        e["naam"] = b["naam"]
+        if not e["links"] or time.time() - (e.get("ts") or 0) > bix.LINKS_VERNIEUW:
+            e["bezig"] = "links"
+            try:
+                sm = await self._sitemap_start(b)
+                for _ in range(40):
+                    await self._sitemap_verder(b, sm, 60, max_sitemaps=80)
+                    if sm["klaar"] or sm["gelezen"] >= 80:
                         break
-                if n % 25 == 0:
-                    self._index_opslaan()
-                if sum(1 for d in e["d"].values() if bix.is_recept(d)) >= bix.INDEX_MAX:
-                    break
-                await asyncio.sleep(bix.PAUZE)
-            e["bezig"] = None
+                if sm["links"]:
+                    sm["klaar"] = True
+                    self._sitemaps[sl] = sm
+                    e.update({"links": sm["links"][:bix.LINKS_MAX], "klaar": True, "melding": None})
+                else:
+                    e["melding"] = "Geen receptlinks gevonden in de sitemap"
+            except Exception as err:  # noqa: BLE001
+                e["melding"] = f"Sitemap niet te lezen: {err}"
+            e["ts"] = time.time()
             self._index_opslaan()
+        todo = bix.te_indexeren(e["links"], e["d"], time.time())
+        if not todo:
+            e["bezig"] = None
+            return
+        e["bezig"] = "recepten"
+        fouten = 0
+        for n, u in enumerate(todo, 1):
+            try:
+                page = await self._haal(u, 3_000_000)
+                item = bix.index_item(page, html_naar_tekst(page)[:20000])
+                e["d"][u] = item or bix.GEEN_RECEPT
+                fouten = 0
+            except asyncio.CancelledError:
+                self._index_opslaan()
+                raise
+            except Exception as err:  # noqa: BLE001
+                e["d"][u] = {"fout": str(err)[:80], "ts": time.time()}
+                fouten += 1
+                if fouten >= bix.MAX_FOUTEN_OP_RIJ:
+                    e["melding"] = f"De site weigert pagina's ({err}); later opnieuw"
+                    break
+            if n % 25 == 0:
+                self._index_opslaan()
+            if sum(1 for d in e["d"].values() if bix.is_recept(d)) >= bix.INDEX_MAX:
+                break
+            await asyncio.sleep(bix.PAUZE)
+        e["bezig"] = None
+        self._index_opslaan()
 
     async def bron_controleren(self, url: str) -> dict:
         """Een nieuwe bron nakijken: naam, kunnen we er recepten van lezen en kunnen we erin zoeken."""

@@ -44,7 +44,7 @@ PANEL_URL = "boodschappen"
 ETEN_URL = "eten"
 KLUSJES_URL = "klusjes"
 STATIC_URL = "/boodschappen_static"
-VERSION = "0.14.0"
+VERSION = "0.14.1"
 
 BON_SCHEMA = vol.Schema(
     {
