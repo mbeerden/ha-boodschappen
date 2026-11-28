@@ -59,6 +59,20 @@ from .recept import (  # noqa: F401 - recept_uit_jsonld wordt ook van hieruit ge
     verrijk_prompt,
     verrijk_toepassen,
 )
+from .dagmenu import (
+    BIBLIOTHEEK,
+    DEFAULT_FILTERS,
+    MAX_LINKS_PER_DAG,
+    MAX_RECEPTEN,
+    opties_prompt,
+    opties_toepassen,
+    recepten_selectie,
+    reserveringen,
+    schoon_filters,
+    verdeel,
+    zoekvraag,
+)
+from .gemini import GeminiNietBeschikbaar, sleutel_en_model, stream as gemini_stream
 from .menu import (
     FEEDBACK,
     ROLLEN,
@@ -106,6 +120,7 @@ DEFAULT_INSTELLINGEN: dict[str, Any] = {
     "huisregels": "",        # vrije tekst voor het AI-voorstel (wie kookt wanneer, dieetwensen, ...)
     "ai": None,              # ai_task.* entiteit (leeg = eerste)
     "bronnen": copy.deepcopy(DEFAULT_BRONNEN),  # de koks/sites waar recepten vandaan mogen komen (zie recept.py)
+    "dagfilters": copy.deepcopy(DEFAULT_FILTERS),  # laatst gebruikte vinkjes en bronnen bij dag voor dag plannen
     **default_menu(),        # profielen, weekdagen, stijl, afwisseling (zie menu.py)
 }
 
@@ -422,6 +437,7 @@ class Eten:
             "recepten": data.get("recepten", {}),
             "planning": data.get("planning", []),
             "voorstel": data.get("voorstel"),
+            "dagopties": data.get("dagopties", {}),
             "suggesties": data.get("suggesties", {}),
             "beoordelingen": data.get("beoordelingen", []),
             "feedback": data.get("feedback", {}),
@@ -441,6 +457,7 @@ class Eten:
         self.s["planning"] = [p for p in self.s["planning"] if p["datum"] >= cutoff]
         gisteren = (date.today() - timedelta(days=1)).isoformat()
         self.s["suggesties"] = {k: v for k, v in self.s.get("suggesties", {}).items() if k >= gisteren}
+        self.s["dagopties"] = {k: v for k, v in self.s.get("dagopties", {}).items() if k >= gisteren}
         self._store.async_delay_save(lambda: self.s, 1)
 
     @property
@@ -462,6 +479,7 @@ class Eten:
             "recepten": recepten,
             "planning": sorted(self.s["planning"], key=lambda p: p["datum"]),
             "voorstel": self.s["voorstel"],
+            "dagopties": self.s.get("dagopties", {}),
             "suggesties": self.s["suggesties"],
             "beoordelingen": self.s["beoordelingen"][-400:],
             "feedback": self.s["feedback"],
@@ -1207,6 +1225,264 @@ class Eten:
         self.save()
         return {"gepland": len(nieuw), "plan_ids": [p["id"] for p in nieuw if p.get("boodschappen", True) and p.get("recept_id")]}
 
+    # --- dag voor dag plannen ----------------------------------------------
+    # Per dag een lichte vraag aan Gemini (alleen nummers + reden), met live meekijken. 'Plan in' haalt het recept op
+    # (bij een link van een bron), zet het in planning en agenda en de producten direct op de lijst. Elke maaltijd
+    # onthoudt wat ze op de lijst zette (lijst) en wat ze uit de voorraad gebruikt (uit_voorraad), zodat wisselen of
+    # verwijderen dat netjes terugdraait.
+    def _herkomst_namen(self) -> dict[str, str | None]:
+        uit: dict[str, str | None] = {}
+        for r in self.s["recepten"].values():
+            h = herkomst(r, self.inst["bronnen"])
+            uit[r["id"]] = h["naam"] if h["soort"] == "bron" else None
+        return uit
+
+    async def _vraag_ai_live(self, taak: str, prompt: str, stuur) -> Any:
+        """Gemini direct (met gedachten in het meekijkvenster); anders de AI-taak van Home Assistant."""
+        km = sleutel_en_model(self.hass)
+        if km:
+            key, model = km
+            stuur({"soort": "stap", "id": "ai", "tekst": f"Gemini ({model}) denkt na…", "status": "bezig"})
+            try:
+                tekst = await gemini_stream(async_get_clientsession(self.hass), key, model, prompt,
+                                            lambda t: stuur({"soort": "gedachte", "tekst": t}))
+                res = parse_json(tekst)
+                if res is not None:
+                    stuur({"soort": "stap", "id": "ai", "tekst": f"Gemini ({model}) heeft gekozen", "status": "klaar"})
+                    return res
+                _LOGGER.warning("Dagvoorstel: geen JSON van Gemini: %s", tekst[:200])
+            except GeminiNietBeschikbaar as err:
+                _LOGGER.info("Dagvoorstel: Gemini direct lukte niet (%s), via de AI-taak", err)
+            stuur({"soort": "stap", "id": "ai", "tekst": "Direct meekijken lukte niet; ik vraag het via de AI-taak (zonder tussenstappen)…",
+                   "status": "bezig"})
+        else:
+            stuur({"soort": "stap", "id": "ai", "tekst": "Gemini denkt na via de AI-taak (geen Google AI-sleutel gevonden, dus zonder tussenstappen)…",
+                   "status": "bezig"})
+        res = await self._vraag_ai(taak, prompt)
+        stuur({"soort": "stap", "id": "ai", "tekst": "Gemini heeft gekozen", "status": "klaar"})
+        return res
+
+    async def dag_opties(self, datum: str, filters: dict, aanwezig: list[str] | None, stuur) -> list[dict]:
+        """Drie opties voor één dag. stuur(event) krijgt de tussenstappen voor het meekijkvenster."""
+        t0 = time.monotonic()
+        datum = str(datum)[:10]
+        d = date.fromisoformat(datum)
+        bronnen_aan = [b for b in self.inst["bronnen"] if b.get("aan", True)]
+        f = schoon_filters(filters, [b["naam"] for b in bronnen_aan])
+        self.inst["dagfilters"] = {k: f[k] for k in ("voorraad", "snel", "aanbieding", "bronnen")}
+        menu = self.menu
+        dag = dag_info(menu, d)
+        if aanwezig is not None:
+            dag["aanwezig"] = [str(n) for n in aanwezig if str(n).strip()]
+        stuur({"soort": "stap", "id": "wie", "status": "klaar",
+               "tekst": f"Wie eet mee: {', '.join(dag['aanwezig']) or 'niemand opgegeven'}"
+                        f" · max {min(int(dag['minuten'] or 45), 30) if f['snel'] else dag['minuten']} min"})
+
+        # voorraad en aanbiedingen (altijd ophalen: ook voor de labels bij de opties)
+        voorraad, bijna = await self._voorraad()
+        namen = {p["id"]: p["name"] for p in self._producten()}
+        acties = self._acties()
+        in_huis = sorted({namen[pid] for pid in voorraad if pid in namen})
+        bijna_op = sorted({namen[pid] for pid in bijna if pid in namen})
+        actie_namen = sorted({namen.get(pid) or str(a.get("product") or "") for pid, a in acties.items()} - {""})
+        if f["voorraad"]:
+            stuur({"soort": "stap", "id": "voorraad", "status": "klaar",
+                   "tekst": f"Voorraad bekeken: {len(in_huis)} producten in huis"
+                            + (f", moet op: {', '.join(bijna_op[:4])}" if bijna_op else "")})
+        if f["aanbieding"]:
+            stuur({"soort": "stap", "id": "acties", "status": "klaar",
+                   "tekst": f"Aanbiedingen: {len(actie_namen)} producten" + (f", o.a. {', '.join(actie_namen[:4])}" if actie_namen else "")})
+
+        # eigen recepten (R-nummers)
+        herk = self._herkomst_namen()
+        compact = recepten_selectie(self._recepten_compact(), f, herk)
+        compact.sort(key=lambda r: (-(r.get("score") or 0), -len(r.get("feedback") or []), r.get("laatst_gegeten") or ""))
+        lab_v, lab_b = (voorraad, bijna) if f["voorraad"] else ({}, set())
+        lab_a = acties if f["aanbieding"] else {}
+        rec_codes: list[dict] = []
+        for i, r in enumerate(compact[:MAX_RECEPTEN], 1):
+            lab = labels_voor(self.s["recepten"][r["id"]], lab_v, lab_b, lab_a, namen)
+            rec_codes.append({
+                "code": f"R{i}", "recept_id": r["id"], "naam": r["naam"], "tijd": r.get("tijd"), "vega": r.get("vega"),
+                "score": r.get("score"), "feedback": r.get("feedback"), "laatst": r.get("laatst_gegeten"),
+                "bron": herk.get(r["id"]), "in_huis": lab["in_huis"], "bijna_op": lab["bijna_op"],
+                "actie": [re.sub(r"\s*\(.*\)$", "", x) for x in lab["actie"]],
+            })
+        if BIBLIOTHEEK in f["bronnen"]:
+            stuur({"soort": "stap", "id": "bib", "status": "klaar", "tekst": f"Mijn bibliotheek: {len(rec_codes)} recepten"})
+        elif rec_codes:
+            stuur({"soort": "stap", "id": "bib", "status": "klaar",
+                   "tekst": f"Al bewaard van deze bron(nen): {len(rec_codes)} recepten"})
+
+        # receptlinks van de gekozen websites (L-nummers)
+        web = [b for b in bronnen_aan if b["naam"] in f["bronnen"] and b["type"] == "website"]
+        klaar = {url_sleutel(r.get("bron")) for r in self.s["recepten"].values() if r.get("bron")}
+        vraag = zoekvraag(f, bijna_op, actie_namen)
+        link_codes: list[dict] = []
+        per_bron = MAX_LINKS_PER_DAG // max(1, len(web))
+        for b in web:
+            sid = f"bron-{b['naam']}"
+            stuur({"soort": "stap", "id": sid, "status": "bezig", "tekst": f"{b['naam']}: receptenlijst ophalen…"})
+            try:
+                links, status = await self._bron_links(b, budget=25.0 / len(web))
+            except Exception as err:  # noqa: BLE001 - één bron die niet wil mag de rest niet tegenhouden
+                stuur({"soort": "stap", "id": sid, "status": "fout", "tekst": f"{b['naam']}: niet bereikbaar ({err})"})
+                continue
+            kand = kandidaten_voor_ai(links, vraag, klaar, per_bron)
+            for u in kand:
+                link_codes.append({"code": f"L{len(link_codes) + 1}", "url": u, "titel": titel_uit_url(u), "bron": b["naam"]})
+            tekst = f"{b['naam']}: {len(links)} recepten gevonden, {len(kand)} voorgelegd"
+            if not status["klaar"]:
+                tekst += " (nog niet alles ingelezen)"
+            stuur({"soort": "stap", "id": sid, "status": "klaar" if kand else "fout", "tekst": tekst})
+        if not rec_codes and not link_codes:
+            raise ValueError("Er is niets om uit te kiezen. Zet 'Mijn bibliotheek' aan of kies een andere bron.")
+
+        # de rest van de week, zodat Gemini niet twee keer hetzelfde voorstelt
+        van, tot = (d - timedelta(days=6)).isoformat(), (d + timedelta(days=6)).isoformat()
+        week = [p["titel"] for p in self.s["planning"]
+                if van <= p["datum"] <= tot and p["datum"] != datum and p.get("titel") and not p.get("geen")]
+        context = context_tekst(menu, self.inst.get("huisregels", ""), self.s["feedback"], date.today())
+        prompt = opties_prompt(dag, f, context, week, rec_codes, link_codes, in_huis, bijna_op, actie_namen, date.today())
+        res = await self._vraag_ai_live("Eten: dagvoorstel", prompt, stuur)
+        codes = {c["code"]: c for c in rec_codes + link_codes}
+        gekozen = opties_toepassen(res, codes)
+        if not gekozen:
+            raise ValueError("Gemini gaf geen bruikbare keuze. Probeer het nog eens.")
+        opties: list[dict] = []
+        for o in gekozen:
+            if o.get("recept_id"):
+                rec = self.s["recepten"][o["recept_id"]]
+                opties.append({
+                    "id": nieuw_id(), "soort": "recept", "recept_id": rec["id"], "titel": rec["naam"], "url": None,
+                    "bron": herk.get(rec["id"]) or "Mijn bibliotheek", "tijd": rec.get("tijd"), "vega": bool(rec.get("vega")),
+                    "reden": o["reden"], "labels": labels_voor(rec, voorraad, bijna, acties, namen),
+                })
+            else:
+                opties.append({
+                    "id": nieuw_id(), "soort": "link", "recept_id": None, "titel": o["titel"], "url": o["url"],
+                    "bron": o["bron"], "tijd": None, "vega": False, "reden": o["reden"], "labels": {},
+                })
+        duur = round(time.monotonic() - t0)
+        self.s["dagopties"][datum] = {"opties": opties, "filters": f, "aanwezig": dag["aanwezig"],
+                                      "gemaakt": datetime.now().isoformat(timespec="minutes"), "duur": duur}
+        self.save()
+        stuur({"soort": "stap", "id": "klaar", "status": "klaar", "tekst": f"Klaar in {duur} s"})
+        return opties
+
+    def dag_opties_weg(self, datum: str) -> None:
+        self.s["dagopties"].pop(str(datum)[:10], None)
+        self.save()
+
+    async def dag_inplannen(self, datum: str, keuze: dict, aanwezig: list[str] | None, stuur) -> dict:
+        """Eén dag plannen en de boodschappen direct op de lijst zetten.
+
+        keuze: {soort: 'recept', recept_id} | {soort: 'link', url, bron} | {soort: 'vriezer'|'anders'|'niet'}.
+        """
+        datum = str(datum)[:10]
+        d = date.fromisoformat(datum)
+        menu = self.menu
+        info = dag_info(menu, d)
+        soort = keuze.get("soort")
+        if soort in VASTE_TITEL:
+            titel = info["notitie"] if soort == "anders" and info.get("notitie") else VASTE_TITEL[soort]
+            stuur({"soort": "stap", "id": "plan", "status": "bezig", "tekst": "In de planning en de agenda zetten…"})
+            item = await self.plan(datum, {"recept_id": None, "titel": titel, "kookt": "", "porties": None, "vriezer": 0,
+                                           "boodschappen": False, "geen": soort == "niet"}, sync=False)
+            await self._lijst_terug(item)
+            stuur({"soort": "stap", "id": "plan", "status": "klaar", "tekst": f"Gepland: {item['titel']}"})
+            self.s["dagopties"].pop(datum, None)
+            self.save()
+            return {"plan_id": item["id"], "titel": item["titel"], "recept_id": None, "toegevoegd": [], "in_huis": [], "los": []}
+
+        rid = keuze.get("recept_id")
+        if soort == "link":
+            url = str(keuze.get("url") or "").strip()
+            if not url.lower().startswith(("http://", "https://")):
+                raise ValueError("Geen geldige link")
+            bestaand = next((r for r in self.s["recepten"].values() if r.get("bron") and url_sleutel(r["bron"]) == url_sleutel(url)), None)
+            if bestaand:
+                rid = bestaand["id"]
+            else:
+                stuur({"soort": "stap", "id": "ophalen", "status": "bezig",
+                       "tekst": f"Recept ophalen van {keuze.get('bron') or urlparse(url).hostname} en koppelen aan je producten…"})
+                rid = await self.recept_importeren(url, None)
+                r = self.s["recepten"][rid]
+                ingr = [i for i in r.get("ingredienten") or [] if not i.get("basis")]
+                gekoppeld = sum(1 for i in ingr if i.get("product_id"))
+                stuur({"soort": "stap", "id": "ophalen", "status": "klaar",
+                       "tekst": f"Recept overgenomen: {r['naam']} ({len(r.get('ingredienten') or [])} ingrediënten, "
+                                f"{gekoppeld} van {len(ingr)} gekoppeld aan Grocy)"
+                                + (" · vertaald" if r.get("vertaald_uit") else "")})
+        if not rid or rid not in self.s["recepten"]:
+            raise ValueError("Recept niet gevonden")
+        aanwezig = [str(n) for n in (aanwezig if aanwezig is not None else info["aanwezig"]) if str(n).strip()]
+        vriezer = int(info.get("vriezer") or 0)
+        stuur({"soort": "stap", "id": "plan", "status": "bezig", "tekst": "In de planning en de agenda zetten…"})
+        item = await self.plan(datum, {"recept_id": rid, "titel": self.s["recepten"][rid]["naam"], "kookt": info.get("kookt") or "",
+                                       "porties": porties_voor(menu["profielen"], aanwezig) + vriezer, "vriezer": vriezer,
+                                       "boodschappen": True, "geen": False}, sync=False)
+        item["aanwezig"] = aanwezig
+        stuur({"soort": "stap", "id": "plan", "status": "klaar", "tekst": f"Gepland: {item['titel']} ({item['porties']} porties)"})
+        stuur({"soort": "stap", "id": "lijst", "status": "bezig", "tekst": "Boodschappen op de lijst zetten…"})
+        res = await self._lijst_voor_plan(item)
+        n = len(res["toegevoegd"])
+        stuur({"soort": "stap", "id": "lijst", "status": "klaar",
+               "tekst": f"{n} {'product' if n == 1 else 'producten'} op de lijst" if n else "Alles is al in huis"})
+        self.s["dagopties"].pop(datum, None)
+        self.save()
+        return {"plan_id": item["id"], "titel": item["titel"], "recept_id": rid, **res}
+
+    async def _lijst_voor_plan(self, item: dict) -> dict:
+        """Zet de boodschappen voor één geplande maaltijd op de lijst; voorraad die een andere maaltijd al gebruikt telt niet mee."""
+        await self._lijst_terug(item)
+        nodig = benodigd([item], self.s["recepten"])
+        voorraad, _bijna = await self._voorraad()
+        gereserveerd = reserveringen(self.s["planning"], date.today().isoformat(), behalve=item["id"])
+        uit_v, kopen = verdeel({pid: n["aantal"] for pid, n in nodig.items()}, voorraad, gereserveerd)
+        await self.c.async_refresh()
+        d = self.c.data
+        regels, toegevoegd = [], []
+        for pid, n in sorted(kopen.items()):
+            if pid not in d.products:
+                continue
+            lid = d.list_for_product(pid)
+            await self.c.add_product(lid, pid, n, f"recept: {item.get('titel') or ''}"[:120])
+            regels.append({"list_id": lid, "product_id": pid, "aantal": n})
+            toegevoegd.append({"product_id": pid, "naam": d.products[pid]["name"], "aantal": n,
+                               "winkel": d.lists.get(lid, {}).get("name", "?")})
+        r = self.s["recepten"].get(item.get("recept_id") or "") or {}
+        los = [i["tekst"] for i in r.get("ingredienten") or [] if not i.get("product_id") and not i.get("basis")]
+        item["lijst"] = regels
+        item["uit_voorraad"] = {str(pid): n for pid, n in uit_v.items()}
+        item["op_lijst"] = True
+        self.save()
+        await self.c.async_refresh()
+        return {"toegevoegd": toegevoegd,
+                "in_huis": [d.products[pid]["name"] for pid in uit_v if pid in d.products],
+                "los": los}
+
+    async def _lijst_terug(self, item: dict) -> int:
+        """Haal van de lijst wat deze maaltijd erop zette (alleen wat nog open staat, niet wat al in het mandje ligt)."""
+        regels = item.pop("lijst", None) or []
+        item.pop("uit_voorraad", None)
+        if not regels or item.get("datum", "") < date.today().isoformat():
+            return 0
+        await self.c.async_refresh()
+        d = self.c.data
+        n = 0
+        for r in regels:
+            try:
+                open_ = d.open_item_for_product(int(r["list_id"]), int(r["product_id"]))
+                if not open_:
+                    continue
+                await self.c.set_amount(open_.id, round(open_.amount - float(r["aantal"]), 3))
+                n += 1
+            except (GrocyError, KeyError, ValueError) as err:
+                _LOGGER.warning("Lijstregel terugdraaien mislukt: %s", err)
+        item["op_lijst"] = False
+        return n
+
     # --- benodigde producten: eerst tonen, dan pas op de lijst --------------
     async def benodigd_overzicht(self, plan_ids: list[str]) -> dict:
         items = [p for p in self.s["planning"] if p["id"] in plan_ids and p["datum"] >= date.today().isoformat()]
@@ -1316,6 +1592,8 @@ class Eten:
             item["titel"] = self.s["recepten"][item["recept_id"]]["naam"]
         else:
             item["recept_id"] = None
+        if item.get("lijst") and (item.get("recept_id") != oud_recept or item.get("geen") or not item.get("boodschappen", True)):
+            await self._lijst_terug(item)  # wat dit vorige gerecht op de lijst zette, gaat er weer af
         if item.get("recept_id") != oud_recept or (item.get("boodschappen", True) and not oud_bs):
             item["op_lijst"] = False  # ander recept, of boodschappen later alsnog aangezet
         item.setdefault("boodschappen", True)
@@ -1366,6 +1644,7 @@ class Eten:
         if not item:
             return
         await self._event_verwijderen(item)
+        await self._lijst_terug(item)
         self.s["planning"].remove(item)
         self.save()
 

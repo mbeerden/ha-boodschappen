@@ -1,6 +1,8 @@
 """Websocket-API voor de Boodschappen-pagina."""
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -10,6 +12,8 @@ from homeassistant.core import HomeAssistant
 
 from .api import GrocyError
 from .const import DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _coordinator(hass: HomeAssistant):
@@ -275,6 +279,68 @@ def _eten(fn, sync: bool = False):
     return wrapper
 
 
+def _eten_stream(fn, annuleerbaar: bool):
+    """Lange actie met tussenstappen: eerst een bevestiging, dan events {soort: stap|gedachte|klaar|fout}.
+
+    Het scherm abonneert zich (subscribeMessage) en toont de stappen live in het meekijkvenster. Het laatste event is
+    'klaar' (met resultaat en de nieuwe stand van Eten) of 'fout'. annuleerbaar: stoppen van het abonnement breekt de
+    actie af (alleen bij een voorstel; plannen maken we altijd af).
+    """
+
+    @websocket_api.async_response
+    async def wrapper(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+        c = _coordinator(hass)
+        if c is None or not hasattr(c, "eten"):
+            connection.send_error(msg["id"], "not_ready", "Boodschappen is niet geladen")
+            return
+        actief = {"aan": True}
+
+        def stuur(ev: dict) -> None:
+            if actief["aan"]:
+                connection.send_message(websocket_api.event_message(msg["id"], ev))
+
+        taak = asyncio.current_task()
+
+        def stop() -> None:
+            actief["aan"] = False
+            if annuleerbaar and taak is not None:
+                taak.cancel()
+
+        connection.subscriptions[msg["id"]] = stop
+        connection.send_result(msg["id"])
+        try:
+            res = await fn(c.eten, msg, stuur)
+            stuur({"soort": "klaar", "resultaat": res, "eten": eten_payload(c)})
+        except asyncio.CancelledError:
+            if actief["aan"]:
+                raise
+        except (GrocyError, ValueError) as err:
+            stuur({"soort": "fout", "tekst": str(err)})
+        except Exception as err:  # noqa: BLE001 - AI/agenda/netwerk: melden i.p.v. hangen
+            _LOGGER.exception("Eten: %s mislukt", msg.get("type"))
+            stuur({"soort": "fout", "tekst": f"{type(err).__name__}: {err}"})
+        finally:
+            connection.subscriptions.pop(msg["id"], None)
+
+    return wrapper
+
+
+async def _e_dag_opties(e, msg, stuur):
+    return await e.dag_opties(msg["datum"], msg.get("filters") or {}, msg.get("aanwezig"), stuur)
+
+
+async def _e_dag_inplannen(e, msg, stuur):
+    return await e.dag_inplannen(msg["datum"], msg["keuze"], msg.get("aanwezig"), stuur)
+
+
+ETEN_STREAMS = [
+    ({vol.Required("type"): "boodschappen/eten_dag_opties", vol.Required("datum"): str, vol.Optional("filters"): dict,
+      vol.Optional("aanwezig"): vol.Any(None, [str])}, _e_dag_opties, True),
+    ({vol.Required("type"): "boodschappen/eten_dag_inplannen", vol.Required("datum"): str, vol.Required("keuze"): dict,
+      vol.Optional("aanwezig"): vol.Any(None, [str])}, _e_dag_inplannen, False),
+]
+
+
 async def _e_data(e, msg):
     return None
 
@@ -409,6 +475,10 @@ async def _e_instellingen(e, msg):
     await e.sync(forceer=True)
 
 
+async def _e_dag_opties_weg(e, msg):
+    e.dag_opties_weg(msg["datum"])
+
+
 async def _e_sync(e, msg):
     await e.sync(forceer=True)
 
@@ -464,6 +534,7 @@ ETEN_COMMANDS = [
       vol.Optional("score"): vol.Any(None, vol.All(int, vol.Range(min=1, max=5))),
       vol.Optional("opmerking"): vol.Any(None, str)}, _e_beoordeel, False),
     ({vol.Required("type"): "boodschappen/eten_instellingen", vol.Required("instellingen"): dict}, _e_instellingen, False),
+    ({vol.Required("type"): "boodschappen/eten_dag_opties_weg", vol.Required("datum"): str}, _e_dag_opties_weg, False),
 ]
 
 
@@ -565,5 +636,7 @@ def async_register(hass: HomeAssistant) -> None:
         websocket_api.async_register_command(hass, websocket_api.websocket_command(schema)(handler))
     for schema, fn, sync in ETEN_COMMANDS:
         websocket_api.async_register_command(hass, websocket_api.websocket_command(schema)(_eten(fn, sync)))
+    for schema, fn, annuleerbaar in ETEN_STREAMS:
+        websocket_api.async_register_command(hass, websocket_api.websocket_command(schema)(_eten_stream(fn, annuleerbaar)))
     for schema, fn, sync in KLUSJES_COMMANDS:
         websocket_api.async_register_command(hass, websocket_api.websocket_command(schema)(_klus(fn, sync)))

@@ -42,6 +42,14 @@ const SOORT = [
 const KORT = ["ma", "di", "wo", "do", "vr", "za", "zo"];
 const SNEL_AANPASSEN = ["Vegetarisch maken", "Sneller klaar (max 30 min)", "Meer kruiden en smaak", "Koolhydraatarmer", "Voor 5 personen", "Zonder oven", "Pittiger", "Kindvriendelijker"];
 const BRON_TYPE = { website: "Website", boek: "Kookboek", anders: "Anders" };
+const BIB = "__bibliotheek__"; // chip 'Mijn bibliotheek' bij dag voor dag plannen (zelfde als dagmenu.BIBLIOTHEEK)
+// kleine markdown voor de gedachten van Gemini: **vet**, alinea's
+const mini = (t) =>
+  esc(t)
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .split(/\n{2,}/)
+    .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
+    .join("");
 
 class EtenPanel extends HTMLElement {
   constructor() {
@@ -154,6 +162,10 @@ class EtenPanel extends HTMLElement {
     root.addEventListener("input", (e) => this._input(e));
     root.addEventListener("change", (e) => this._change(e));
     root.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && e.target.id === "dag-wens") {
+        e.preventDefault();
+        root.querySelector("[data-act=dagvoorstel]")?.click();
+      }
       if (e.key === "Enter" && e.target.id === "ont-vraag") {
         e.preventDefault();
         root.querySelector("[data-act=ontzoek]")?.click();
@@ -199,6 +211,7 @@ class EtenPanel extends HTMLElement {
       else if (v.soort === "instellingen") main.innerHTML = this._instView();
       else if (v.soort === "plannen") main.innerHTML = this._plannenView();
       else if (v.soort === "voorstel") main.innerHTML = this._voorstelView();
+      else if (v.soort === "dag") main.innerHTML = this._dagView();
       else if (v.soort === "benodigd") main.innerHTML = this._benodigdView();
       else if (v.soort === "bronnen") main.innerHTML = this._bronnenView();
       else if (v.soort === "ontdek") main.innerHTML = this._ontdekView();
@@ -250,7 +263,7 @@ class EtenPanel extends HTMLElement {
           : `<div class="voorstelbalk">${
               v
                 ? `<button class="primary breed" data-act="naarvoorstel">✨ Voorstel bekijken (${esc(datumKort(v.van))} – ${esc(datumKort(v.tot))})</button>`
-                : `<button class="primary breed" data-act="planstart">✨ Weekmenu voorstellen</button>`
+                : `<button class="primary breed" data-act="dagstart">✨ Dag voor dag plannen</button>`
             }</div>`
       }`;
   }
@@ -320,6 +333,7 @@ class EtenPanel extends HTMLElement {
     }
     if (!ex.length)
       html += `<div class="leegrij"><button class="leegdag" data-act="plan" data-datum="${ds}">+ Plan een maaltijd</button>
+        ${ds >= vandaag ? `<button class="link" data-act="dagstart" data-datum="${ds}">✨ Stel voor</button>` : ""}
         <button class="link" data-act="geenmaaltijd" data-datum="${ds}">Geen maaltijd</button></div>`;
     if (ds >= vandaag) html += this._suggestie(ds) || this._aanpasBlok(ds, null);
     return html;
@@ -616,6 +630,295 @@ class EtenPanel extends HTMLElement {
       ${af ? `<p class="hint">Niet lekker: wordt niet meer voorgesteld.</p>` : ""}
       <div class="fbrij">${this._fbKnoppen(o.recept_id, o.titel)}</div>
     </div>`;
+  }
+
+  // ------------------------------------------------------------------ dag voor dag plannen
+  // Per dag: wie eet mee, vinkjes (voorraad, snel, aanbieding), bronnen, wens → Gemini geeft 3 opties (met
+  // meekijkvenster) → "Plan in" zet het in planning en agenda en de producten direct op de lijst.
+  async _dagStart(datum = null) {
+    const vandaag = iso(new Date());
+    let van = datum || (iso(this.week) > vandaag ? iso(this.week) : vandaag);
+    if (van < vandaag) van = vandaag;
+    const f = this.d.instellingen.dagfilters || {};
+    this.dp = {
+      van, dagen: [], sel: datum, perDag: {}, res: {},
+      filters: { voorraad: f.voorraad ?? true, snel: !!f.snel, aanbieding: f.aanbieding ?? true, bronnen: f.bronnen?.length ? [...f.bronnen] : [BIB] },
+    };
+    this.live = null;
+    this.view = { soort: "dag" };
+    this._scrollTop = true;
+    this._render();
+    await this._dagLaad(van);
+  }
+
+  async _dagLaad(van) {
+    const tot = iso(plusDagen(vanIso(van), 6));
+    try {
+      const r = await this._hass.callWS({ type: "boodschappen/eten_dagen", van, tot });
+      this.dp.dagen = r.resultaat || [];
+      this.err = "";
+    } catch (e) {
+      this.err = e.message || "Kon de dagen niet laden.";
+    }
+    this.dp.van = van;
+    const inBereik = this.dp.dagen.some((d) => d.datum === this.dp.sel);
+    if (!inBereik) {
+      const vrij = this.dp.dagen.find((d) => d.datum >= iso(new Date()) && !this._geplandOp(d.datum) && d.soort === "koken");
+      this.dp.sel = (vrij || this.dp.dagen[0] || {}).datum || van;
+    }
+    this._render();
+  }
+
+  _geplandOp(datum) {
+    return (this.d?.planning || []).find((p) => p.datum === datum && !p.historie);
+  }
+
+  _dagState(datum) {
+    const info = this.dp.dagen.find((d) => d.datum === datum) || { soort: "koken", aanwezig: [] };
+    if (!this.dp.perDag[datum]) {
+      const opties = (this.d.dagopties || {})[datum];
+      this.dp.perDag[datum] = { soort: info.soort || "koken", aanwezig: [...(opties?.aanwezig || info.aanwezig || [])], wens: opties?.filters?.wens || "" };
+    }
+    return { info, st: this.dp.perDag[datum] };
+  }
+
+  _dagView() {
+    const dp = this.dp;
+    if (!dp) return `<button class="terug" data-act="terug">‹ Weekmenu</button>`;
+    const vandaag = iso(new Date());
+    const strip = dp.dagen
+      .map((d) => {
+        const p = this._geplandOp(d.datum);
+        const heeftOpties = !!(this.d.dagopties || {})[d.datum];
+        const icoon = p ? (p.geen ? "—" : "✓") : heeftOpties ? "✨" : { vriezer: "❄", anders: "🍽", niet: "—" }[d.soort] || "";
+        const voorbij = d.datum < vandaag;
+        return `<button class="dpil ${d.datum === dp.sel ? "on" : ""} ${p ? "klaar" : ""} ${voorbij ? "voorbij" : ""}" data-act="dagkies" data-datum="${d.datum}"
+          aria-pressed="${d.datum === dp.sel}" aria-label="${esc(dagNaam(d.datum))} ${esc(datumKort(d.datum))}${p ? `: ${esc(p.titel)}` : ""}">
+          <span class="dk">${esc(dagNaam(d.datum, "short"))}</span><b>${vanIso(d.datum).getDate()}</b><small>${icoon}</small></button>`;
+      })
+      .join("");
+    const vorigeKan = dp.van > vandaag;
+    let html = `<button class="terug" data-act="terug">‹ Weekmenu</button>
+      <h2 class="kop2">Dag voor dag plannen</h2>
+      <div class="dstrip">
+        <button class="rond klein" data-act="dagschuif" data-n="-7" ${vorigeKan ? "" : "disabled"} aria-label="Vorige dagen">‹</button>
+        <div class="dpillen">${strip || `<span class="zacht">Laden…</span>`}</div>
+        <button class="rond klein" data-act="dagschuif" data-n="7" aria-label="Volgende dagen">›</button>
+      </div>`;
+    if (dp.sel && dp.dagen.length) html += this._dagPaneel(dp.sel);
+    return html;
+  }
+
+  _dagPaneel(datum) {
+    const { info, st } = this._dagState(datum);
+    const p = this._geplandOp(datum);
+    const live = this.live && this.live.datum === datum ? this.live : null;
+    const bezig = !!this.live?.bezig;
+    const personen = this.d.instellingen.personen || [];
+    const f = this.dp.filters;
+    const opties = (this.d.dagopties || {})[datum];
+    const res = this.dp.res[datum];
+    let html = `<section class="dpaneel" aria-label="${esc(dagNaam(datum))}">
+      <div class="dagkop"><span class="dn">${esc(dagNaam(datum))}</span><span class="dd">${esc(datumKort(datum))}</span>
+        ${info.kookt ? `<span class="zacht">· kookt: ${esc(info.kookt)}</span>` : ""}</div>`;
+    if (p && !res) {
+      const r = p.recept_id ? this.recept(p.recept_id) : null;
+      html += `<div class="dgepland"><span>Gepland: <b>${esc(p.titel)}</b>${p.op_lijst && p.lijst?.length ? ` <small class="zacht">· boodschappen staan op de lijst</small>` : ""}</span>
+        ${r ? `<button class="link" data-act="dagrecept" data-id="${r.id}">Recept</button>` : ""}</div>
+        <p class="hint">Kies hieronder iets anders om het te vervangen. Wat dit gerecht op de lijst zette, gaat er dan weer af.</p>`;
+    }
+    html += `<div class="segment" role="group" aria-label="Soort dag">${SOORT.map(
+      ([k, t]) => `<button class="${st.soort === k ? "on" : ""}" data-act="dagsoort" data-soort="${k}" aria-pressed="${st.soort === k}" ${bezig ? "disabled" : ""}>${t}</button>`
+    ).join("")}</div>`;
+    if (st.soort !== "koken") {
+      const t = st.soort === "anders" && info.notitie ? info.notitie : { vriezer: "Uit de vriezer", anders: "Iemand anders kookt", niet: "Geen maaltijd" }[st.soort];
+      html += `<div class="knoppen"><button class="primary" data-act="dagvast" ${bezig ? "disabled" : ""}>Plan in: ${esc(t)}</button>
+        <span class="zacht">geen boodschappen</span></div>`;
+    } else {
+      html += `<div class="dblok"><span class="dlabel">Wie eet mee</span><div class="chips-wrap">${personen
+        .map((n) => `<button class="pers ${st.aanwezig.includes(n) ? "on" : ""}" data-act="dagpers" data-naam="${esc(n)}" aria-pressed="${st.aanwezig.includes(n)}">${st.aanwezig.includes(n) ? "✓ " : ""}${esc(n)}</button>`)
+        .join("")}</div></div>
+        <div class="dblok"><span class="dlabel">Gemini let op</span><div class="chips-wrap">
+          ${[["voorraad", "📦 Kijk naar de voorraad"], ["snel", "⚡ Lekker snel"], ["aanbieding", "🏷 In de aanbieding"]]
+            .map(([k, t]) => `<button class="tog ${f[k] ? "on" : ""}" data-act="dagtog" data-k="${k}" role="switch" aria-checked="${!!f[k]}">${f[k] ? "☑" : "☐"} ${t}</button>`)
+            .join("")}</div></div>
+        <div class="dblok"><span class="dlabel">Recepten uit</span><div class="chips-wrap">
+          ${this._dagBronnen().map(([k, t]) => {
+            const aan = f.bronnen.includes(k);
+            return `<button class="tog bron ${aan ? "on" : ""}" data-act="dagbron" data-k="${esc(k)}" aria-pressed="${aan}">${aan ? "✓ " : ""}${esc(t)}</button>`;
+          }).join("")}</div>
+          ${f.bronnen.includes(BIB) ? "" : `<small class="zacht">Alleen nieuwe recepten van ${esc(f.bronnen.join(", "))} (plus wat je daarvan al bewaard hebt).</small>`}
+        </div>
+        <div class="dwens"><input id="dag-wens" value="${esc(st.wens)}" placeholder="Wens (optioneel), bijv. iets met pompoen" aria-label="Wens voor ${esc(dagNaam(datum))}" ${bezig ? "disabled" : ""}>
+          <button class="primary" data-act="dagvoorstel" ${bezig || !f.bronnen.length ? "disabled" : ""}>✨ ${opties ? "Nieuwe opties" : "Stel voor"}</button></div>`;
+    }
+    if (live) html += `<div class="meekijk-plek">${this._meekijk(live)}</div>`;
+    if (res) html += this._dagResultaat(res);
+    else if (st.soort === "koken" && opties && !(live && live.bezig && live.modus === "opties")) {
+      html += `<div class="opties">${opties.opties.map((o, i) => this._dagOptie(datum, o, i, bezig)).join("")}</div>
+        <p class="hint">Voorgesteld ${esc(String(opties.gemaakt || "").slice(11, 16))}${opties.duur ? ` · in ${opties.duur} s` : ""}. Met de knoppen leert Gemini wat jullie wel en niet lekker vinden.</p>`;
+    }
+    const volgende = this._dagVolgende(datum);
+    html += `<div class="knoppen">${volgende ? `<span class="vul"></span><button class="sec-btn" data-act="dagkies" data-datum="${volgende}" ${bezig ? "disabled" : ""}>Volgende dag: ${esc(dagNaam(volgende))} →</button>` : ""}</div>
+      </section>`;
+    return html;
+  }
+
+  _dagBronnen() {
+    const web = (this.d.instellingen.bronnen || []).filter((b) => b.aan !== false && b.type === "website");
+    return [[BIB, "📚 Mijn bibliotheek"], ...web.map((b) => [b.naam, b.naam])];
+  }
+
+  _dagVolgende(datum) {
+    const i = this.dp.dagen.findIndex((d) => d.datum === datum);
+    return i >= 0 && i < this.dp.dagen.length - 1 ? this.dp.dagen[i + 1].datum : null;
+  }
+
+  _dagOptie(datum, o, i, bezig) {
+    const fb = this._fbVan(o.recept_id, o.titel);
+    const af = !!fb.niet_lekker;
+    const l = o.labels || {};
+    const labels = [
+      ...(l.actie || []).map((x) => `<span class="lab actie">🏷 ${esc(x)}</span>`),
+      ...(l.bijna_op || []).map((x) => `<span class="lab bijna">⏰ ${esc(x)} op maken</span>`),
+      ...(l.in_huis || []).slice(0, 4).map((x) => `<span class="lab huis">📦 ${esc(x)}</span>`),
+    ].join("");
+    const bekijk = o.recept_id
+      ? `<button class="link" data-act="dagrecept" data-id="${o.recept_id}">Recept bekijken</button>`
+      : o.url ? `<a class="link" href="${esc(o.url)}" target="_blank" rel="noopener">Bekijk op de site ↗</a>` : "";
+    return `<div class="optie dopt ${af ? "af" : ""}">
+      <div class="otekst">
+        <span class="rol">${o.soort === "link" ? "🌐" : "📚"} ${esc(o.bron || "")}${o.soort === "link" ? " · nieuw recept" : ""}</span>
+        <span class="t">${esc(o.titel)}</span>
+        ${o.tijd || o.vega ? `<small>${[o.tijd ? `${o.tijd} min` : "", o.vega ? "🌱 vega" : ""].filter(Boolean).join(" · ")}</small>` : ""}
+        ${o.reden ? `<span class="reden">${esc(o.reden)}</span>` : ""}
+        ${labels ? `<span class="labels">${labels}</span>` : ""}
+      </div>
+      ${af ? `<p class="hint">Niet lekker: wordt niet meer voorgesteld.</p>` : ""}
+      <div class="fbrij">${this._fbKnoppen(o.recept_id, o.titel)}</div>
+      <div class="knoppen klein">${bekijk}<span class="vul"></span>
+        <button class="primary klein" data-act="daginplan" data-i="${i}" ${bezig || af ? "disabled" : ""}>Plan in</button></div>
+    </div>`;
+  }
+
+  _dagResultaat(res) {
+    const perWinkel = {};
+    for (const t of res.toegevoegd || []) (perWinkel[t.winkel] ||= []).push(t);
+    let html = `<div class="dres" role="status">
+      <p class="drestitel">✓ Gepland: <b>${esc(res.titel)}</b></p>`;
+    const n = (res.toegevoegd || []).length;
+    if (res.recept_id) {
+      html += `<p>🛒 ${n ? `${n} ${n === 1 ? "product" : "producten"} op de boodschappenlijst` : "Niets nodig: alles is al in huis"}</p>`;
+      for (const [w, lijst] of Object.entries(perWinkel))
+        html += `<p class="dreswinkel"><b>${esc(w)}:</b> ${lijst.map((t) => `${esc(t.naam)}${t.aantal > 1 ? ` ×${fmtNum(t.aantal)}` : ""}`).join(", ")}</p>`;
+      if (res.in_huis?.length) html += `<p class="zacht">📦 Uit de voorraad: ${res.in_huis.map(esc).join(", ")}</p>`;
+      if (res.los?.length) html += `<p class="zacht">⚠ Niet gekoppeld aan Grocy (zelf toevoegen als het nodig is): ${res.los.map(esc).join(", ")}</p>`;
+    }
+    html += `<div class="knoppen klein">
+        ${res.recept_id ? `<button class="sec-btn" data-act="dagrecept" data-id="${res.recept_id}">Recept bekijken</button>` : ""}
+        <button class="link" data-act="dagopnieuw">Toch iets anders kiezen</button></div></div>`;
+    return html;
+  }
+
+  // meekijkvenster: tussenstappen en de gedachten van Gemini, live
+  _meekijk(live) {
+    const icoon = { bezig: `<span class="spinner klein" aria-hidden="true"></span>`, klaar: "✓", fout: "⚠", info: "ℹ" };
+    const kop = live.bezig
+      ? live.modus === "plannen" ? "Bezig met plannen…" : "Gemini denkt na…"
+      : live.fout ? "Dat lukte niet" : live.modus === "plannen" ? "Zo ging het plannen" : "Zo kwam Gemini tot deze opties";
+    const open = live.bezig || live.fout || live.open;
+    return `<details class="meekijk ${live.bezig ? "bezig" : ""}" ${open ? "open" : ""}>
+      <summary data-act="meekijkklap">${live.bezig ? `<span class="spinner klein" aria-hidden="true"></span>` : "🔎"} ${esc(kop)}</summary>
+      <ol class="mstappen">${live.stappen.map((s) => `<li class="ms-${s.status || "info"}"><span class="mi">${icoon[s.status] || icoon.info}</span><span>${esc(s.tekst)}</span></li>`).join("")}</ol>
+      ${live.gedachten ? `<div class="gedachten" aria-live="off">${mini(live.gedachten)}</div>` : ""}
+      ${live.fout ? `<p class="fout">${esc(live.fout)}</p>` : ""}
+    </details>`;
+  }
+
+  _meekijkBijwerken() {
+    const plek = this.shadowRoot.querySelector(".meekijk-plek");
+    if (!plek || !this.live) return this._render();
+    plek.innerHTML = this._meekijk(this.live);
+    const g = plek.querySelector(".gedachten");
+    if (g) g.scrollTop = g.scrollHeight;
+  }
+
+  _stream(msg, datum, modus) {
+    if (this.live?.bezig) return Promise.resolve(null);
+    this.live = { datum, modus, stappen: [], gedachten: "", bezig: true, fout: "", open: false };
+    this.err = "";
+    this._render();
+    return new Promise((resolve) => {
+      let klaar = false;
+      const einde = (waarde) => {
+        if (klaar) return;
+        klaar = true;
+        this.live.bezig = false;
+        this._liveStop = null;
+        resolve(waarde);
+      };
+      const opEvent = (ev) => {
+        if (klaar) return;
+        if (ev.soort === "stap") {
+          const i = this.live.stappen.findIndex((s) => s.id === ev.id);
+          if (i >= 0) this.live.stappen[i] = ev;
+          else this.live.stappen.push(ev);
+        } else if (ev.soort === "gedachte") {
+          const g = this.live.gedachten;
+          this.live.gedachten = g + (g && !g.endsWith("\n") ? "\n\n" : "") + ev.tekst;
+        } else if (ev.soort === "klaar") {
+          if (ev.eten) this.d = ev.eten;
+          einde(ev.resultaat ?? true);
+          return this._render();
+        } else if (ev.soort === "fout") {
+          this.live.fout = ev.tekst || "Dat lukte niet.";
+          einde(null);
+          return this._render();
+        }
+        this._meekijkBijwerken();
+      };
+      this._hass.connection
+        .subscribeMessage(opEvent, msg)
+        .then((unsub) => {
+          this._liveStop = () => {
+            try {
+              Promise.resolve(unsub()).catch(() => {});
+            } catch (_) {}
+          };
+          if (klaar) this._liveStop = null;
+        })
+        .catch((e) => {
+          this.live.fout = e.message || "Dat lukte niet.";
+          einde(null);
+          this._render();
+        });
+    });
+  }
+
+  _liveAfbreken() {
+    if (this._liveStop) this._liveStop();
+    this._liveStop = null;
+    if (this.live?.bezig) this.live = null;
+  }
+
+  async _dagVoorstel() {
+    const datum = this.dp.sel;
+    const { st } = this._dagState(datum);
+    delete this.dp.res[datum];
+    await this._stream({
+      type: "boodschappen/eten_dag_opties", datum, aanwezig: st.aanwezig,
+      filters: { ...this.dp.filters, wens: st.wens || "" },
+    }, datum, "opties");
+  }
+
+  async _dagInplannen(keuze) {
+    const datum = this.dp.sel;
+    const { st } = this._dagState(datum);
+    const res = await this._stream({ type: "boodschappen/eten_dag_inplannen", datum, keuze, aanwezig: st.aanwezig }, datum, "plannen");
+    if (res && typeof res === "object") {
+      this.dp.res[datum] = res;
+      this._render();
+    }
   }
 
   // ------------------------------------------------------------------ benodigde producten
@@ -1215,6 +1518,7 @@ class EtenPanel extends HTMLElement {
   _input(e) {
     if (e.target.classList?.contains("raanpas-wens") && this.raanpas) this.raanpas.wens = e.target.value;
     if (e.target.id === "ont-vraag" && this.ont) this.ont.vraag = e.target.value;
+    if (e.target.id === "dag-wens" && this.dp?.sel) this._dagState(this.dp.sel).st.wens = e.target.value;
     if (e.target.id === "bn-url" && this.bronNieuw) this.bronNieuw.url = e.target.value;
     if (e.target.id === "bn-naam" && this.bronNieuw) this.bronNieuw.naam = e.target.value;
     if (e.target.id === "bn-notitie" && this.bronNieuw) this.bronNieuw.notitie = e.target.value;
@@ -1346,6 +1650,62 @@ class EtenPanel extends HTMLElement {
         this.view = { soort: "voorstel" };
         this._scrollTop = true;
         return this._render();
+      case "dagstart":
+        return this._dagStart(b.dataset.datum || null);
+      case "dagschuif": {
+        const van = iso(plusDagen(vanIso(this.dp.van), Number(b.dataset.n)));
+        const vandaag = iso(new Date());
+        this.dp.sel = null;
+        return this._dagLaad(van < vandaag ? vandaag : van);
+      }
+      case "dagkies":
+        if (this.live?.bezig) return;
+        this.dp.sel = b.dataset.datum;
+        if (this.live && this.live.datum !== b.dataset.datum) this.live = null;
+        this._scrollTop = true;
+        return this._render();
+      case "dagsoort":
+        this._dagState(this.dp.sel).st.soort = b.dataset.soort;
+        return this._render();
+      case "dagpers": {
+        const st = this._dagState(this.dp.sel).st;
+        const n = b.dataset.naam;
+        st.aanwezig = st.aanwezig.includes(n) ? st.aanwezig.filter((x) => x !== n) : [...st.aanwezig, n];
+        return this._render();
+      }
+      case "dagtog":
+        this.dp.filters[b.dataset.k] = !this.dp.filters[b.dataset.k];
+        return this._render();
+      case "dagbron": {
+        const k = b.dataset.k;
+        const f = this.dp.filters;
+        f.bronnen = f.bronnen.includes(k) ? f.bronnen.filter((x) => x !== k) : [...f.bronnen, k];
+        return this._render();
+      }
+      case "dagvoorstel":
+        return this._dagVoorstel();
+      case "daginplan": {
+        const o = ((this.d.dagopties || {})[this.dp.sel]?.opties || [])[Number(b.dataset.i)];
+        if (!o) return;
+        return this._dagInplannen(o.soort === "link" ? { soort: "link", url: o.url, bron: o.bron } : { soort: "recept", recept_id: o.recept_id });
+      }
+      case "dagvast":
+        return this._dagInplannen({ soort: this._dagState(this.dp.sel).st.soort });
+      case "dagopnieuw":
+        delete this.dp.res[this.dp.sel];
+        this.live = null;
+        return this._render();
+      case "dagrecept":
+        this._terugNaar = { soort: "dag" };
+        this.view = { soort: "recept", id: b.dataset.id };
+        this._scrollTop = true;
+        return this._render();
+      case "meekijkklap":
+        e.preventDefault();
+        if (this.live) this.live.open = !b.closest("details").open;
+        if (this.live && !this.live.bezig) this._meekijkBijwerken();
+        else b.closest("details").open = !b.closest("details").open;
+        return;
       case "planstart": {
         const vandaag = iso(new Date());
         const ma = iso(this.week);
@@ -1541,11 +1901,16 @@ class EtenPanel extends HTMLElement {
       case "terug":
         if (this.view?.soort === "instellingen") this.inst = null;
         if (this.view?.soort === "plannen") this.plan = null;
+        if (this.view?.soort === "dag") {
+          this._liveAfbreken();
+          this.dp = null;
+          this.live = null;
+        }
         this._fotos = null;
         this._fotoFout = "";
         this.raanpas = null;
         this.bronEdit = null;
-        if (["bronnen", "ontdek", "nieuw"].includes(this.view?.soort) && this._terugNaar) {
+        if (["bronnen", "ontdek", "nieuw", "recept"].includes(this.view?.soort) && this._terugNaar) {
           this.bronEdit = null;
           this.view = this._terugNaar;
           this._terugNaar = null;
@@ -2229,6 +2594,58 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; flex: 1; }
 .orij a.sec-btn { display: inline-flex; align-items: center; text-decoration: none; }
 .otekst small.warn { color: var(--warning-color, #b26a00); }
 .primary.klein { min-height: 40px; padding: 0 16px; font-size: 14px; }
+/* dag voor dag plannen */
+.dstrip { display: flex; align-items: center; gap: 6px; margin: 6px 0 12px; }
+.rond.klein { width: 36px; height: 36px; font-size: 22px; flex: none; }
+.dpillen { flex: 1; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.dpil { display: grid; justify-items: center; gap: 1px; padding: 6px 0 4px; border-radius: 12px; border: 1px solid var(--rand);
+  background: var(--card-background-color); min-height: 62px; }
+.dpil .dk { font-size: 12px; color: var(--secondary-text-color); text-transform: capitalize; }
+.dpil b { font-size: 17px; font-variant-numeric: tabular-nums; }
+.dpil small { font-size: 12px; min-height: 16px; color: var(--secondary-text-color); }
+.dpil.klaar small { color: var(--success-color, #2e7d32); font-weight: 700; }
+.dpil.voorbij { opacity: .6; }
+.dpil.on { background: var(--acc); border-color: var(--acc); color: var(--text-primary-color, #fff); }
+.dpil.on .dk, .dpil.on small { color: inherit; }
+.dpaneel { background: var(--card-background-color); border-radius: 14px; box-shadow: 0 0 0 1px var(--rand) inset; padding: 12px 14px;
+  display: grid; gap: 10px; }
+.dpaneel .dagkop { margin: 0; flex-wrap: wrap; }
+.dgepland { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-radius: 10px;
+  background: color-mix(in srgb, var(--success-color, #2e7d32) 12%, transparent); }
+.dpaneel > .hint { margin-top: -6px; }
+.dblok { display: grid; gap: 6px; }
+.dlabel { font-size: 13px; color: var(--secondary-text-color); }
+.tog { padding: 8px 12px; border-radius: 18px; font-size: 14px; border: 1px solid var(--rand); background: var(--card-background-color); }
+.tog.on { border-color: color-mix(in srgb, var(--acc) 60%, transparent); background: color-mix(in srgb, var(--acc) 16%, transparent); }
+.tog.bron.on { background: var(--acc); color: var(--text-primary-color, #fff); border-color: var(--acc); }
+.dwens { display: flex; gap: 8px; flex-wrap: wrap; }
+.dwens input { flex: 1 1 200px; min-width: 0; min-height: 44px; padding: 0 14px; border-radius: 22px; border: 1px solid var(--rand); font-size: 15px;
+  background: var(--primary-background-color); color: var(--primary-text-color); }
+.meekijk { border-radius: 12px; background: color-mix(in srgb, var(--acc) 7%, var(--card-background-color));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--acc) 30%, transparent) inset; padding: 2px 12px; }
+.meekijk summary { cursor: pointer; padding: 10px 0; font-weight: 500; display: flex; align-items: center; gap: 8px; list-style: none; }
+.meekijk summary::-webkit-details-marker { display: none; }
+.meekijk summary::after { content: "▾"; margin-left: auto; color: var(--secondary-text-color); }
+.meekijk[open] summary::after { transform: rotate(180deg); }
+.spinner.klein { display: inline-block; width: 14px; height: 14px; border-width: 2px; vertical-align: -2px; }
+.mstappen { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 4px; font-size: 14px; }
+.mstappen li { display: flex; gap: 8px; align-items: baseline; }
+.mstappen .mi { flex: none; width: 16px; text-align: center; }
+.mstappen .ms-klaar .mi { color: var(--success-color, #2e7d32); }
+.mstappen .ms-fout { color: var(--warning-color, #b26a00); }
+.mstappen .ms-bezig .mi { align-self: center; }
+.gedachten { max-height: 220px; overflow-y: auto; margin: 0 0 10px; padding: 8px 10px; border-radius: 8px; background: var(--zacht);
+  font-size: 13px; line-height: 1.45; color: var(--secondary-text-color); border-left: 3px solid color-mix(in srgb, var(--acc) 50%, transparent); }
+.gedachten p { margin: 0 0 6px; }
+.gedachten b { color: var(--primary-text-color); }
+.optie.dopt { gap: 4px; }
+.optie.dopt .knoppen { margin-top: 2px; }
+.optie.dopt a.link { text-decoration: none; }
+.dres { display: grid; gap: 4px; padding: 10px 12px; border-radius: 12px; background: color-mix(in srgb, var(--success-color, #2e7d32) 12%, transparent); }
+.dres p { margin: 0; font-size: 14px; }
+.dres .drestitel { font-size: 16px; }
+.dreswinkel { padding-left: 22px; }
+@media (max-width: 420px) { .dpil .dk { font-size: 11px; } .dpil b { font-size: 15px; } .dstrip .rond.klein { width: 30px; } }
 @media (min-width: 700px) {
   .main { padding: 14px 24px 96px; }
   .main > *, .bar > * { max-width: 720px; margin-left: auto; margin-right: auto; }
