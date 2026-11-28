@@ -116,8 +116,8 @@ def opties_prompt(
         "Je bent de maaltijdadviseur van een gezin. Stel voor de avondmaaltijd van deze dag precies 3 verschillende "
         "gerechten voor. Kies ALLEEN uit de genummerde lijsten hieronder; verzin zelf geen gerechten.",
         'Antwoord ALLEEN met een JSON-lijst van 3 objecten: [{"keuze": "R3" of "L12", "reden": str}]',
-        "- R-nummers zijn recepten uit de eigen receptenbibliotheek. L-nummers zijn recepten van receptsites waarvan "
-        "alleen de titel bekend is (soms Engels); beoordeel die op de titel.",
+        "- R-nummers zijn recepten uit de eigen receptenbibliotheek. L-nummers zijn recepten van receptsites (soms "
+        "Engels); van de meeste staan tijd, vega en de belangrijkste ingrediënten erbij, van sommige alleen de titel.",
         "- reden: één korte Nederlandse zin waarom dit past. Noem concreet wat in huis is of in de aanbieding als je "
         "daarop kiest.",
         "- Houd je strikt aan dieet en allergieën van wie er mee-eet. Eet er iemand vegetarisch mee, kies dan iets "
@@ -157,7 +157,7 @@ def opties_prompt(
     if recepten:
         regels += ["", "Eigen recepten:", *[recept_regel(r["code"], r) for r in recepten]]
     if links:
-        regels += ["", "Recepten van receptsites:", *[f"{l['code']}. {l['titel']} ({l['bron']})" for l in links]]
+        regels += ["", "Recepten van receptsites:", *[l.get("regel") or f"{l['code']}. {l['titel']} ({l['bron']})" for l in links]]
     return "\n".join(regels)
 
 

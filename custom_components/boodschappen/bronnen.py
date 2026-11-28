@@ -159,8 +159,8 @@ def bron_advies(leesbaar: bool | None, gevonden: int) -> str:
 def kies_prompt(kandidaten: list[dict], wens: str, context: str, in_huis: list[str], acties: list[str], n: int = 8) -> str:
     """Laat de AI uit een lijst receptlinks (alleen de titels) de beste kiezen; hij geeft nummers terug, nooit zelf links."""
     return (
-        f"Je helpt een gezin met een recept zoeken. Hieronder staat een lijst gerechten (nummer + titel, uit de links van "
-        f"receptsites, soms in het Engels). Kies de {n} die het best passen en geef ze in volgorde van passendheid.\n"
+        f"Je helpt een gezin met een recept zoeken. Hieronder staat een lijst gerechten (nummer + titel van receptsites, soms in het "
+        f"Engels; bij sommige ook tijd en ingrediënten). Kies de {n} die het best passen en geef ze in volgorde van passendheid.\n"
         "Antwoord ALLEEN met een JSON-lijst: "
         '[{"n": int, "reden": str}] — n is het nummer uit de lijst, reden is één korte Nederlandse zin.\n'
         "- Kies alleen nummers die in de lijst staan; verzin niets.\n"
@@ -170,7 +170,7 @@ def kies_prompt(kandidaten: list[dict], wens: str, context: str, in_huis: list[s
         f"{context}\n\n"
         f"In huis (voorraad): {', '.join(in_huis) or '-'}\n"
         f"In de aanbieding: {', '.join(acties) or '-'}\n\n"
-        "Gerechten:\n" + "\n".join(f"{k['n']}. {k['titel']}" for k in kandidaten)
+        "Gerechten:\n" + "\n".join(k.get("regel") or f"{k['n']}. {k['titel']}" for k in kandidaten)
     )
 
 

@@ -479,6 +479,10 @@ async def _e_dag_opties_weg(e, msg):
     e.dag_opties_weg(msg["datum"])
 
 
+async def _e_index_vernieuwen(e, msg):
+    e.index_vernieuwen(msg.get("naam"))
+
+
 async def _e_sync(e, msg):
     await e.sync(forceer=True)
 
@@ -535,6 +539,7 @@ ETEN_COMMANDS = [
       vol.Optional("opmerking"): vol.Any(None, str)}, _e_beoordeel, False),
     ({vol.Required("type"): "boodschappen/eten_instellingen", vol.Required("instellingen"): dict}, _e_instellingen, False),
     ({vol.Required("type"): "boodschappen/eten_dag_opties_weg", vol.Required("datum"): str}, _e_dag_opties_weg, False),
+    ({vol.Required("type"): "boodschappen/eten_index_vernieuwen", vol.Optional("naam"): vol.Any(None, str)}, _e_index_vernieuwen, False),
 ]
 
 

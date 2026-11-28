@@ -25,13 +25,14 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .aanbiedingen import html_naar_tekst, parse_json
+from . import bronindex as bix
 from .api import GrocyError
 from .bronnen import (
     SITEMAP_PADEN,
+    _vraagwoorden,
     bron_advies,
     foto_prompt,
     is_sitemap_index,
-    kandidaten_voor_ai,
     kies_prompt,
     kies_toepassen,
     receptlink_mogelijk,
@@ -64,6 +65,7 @@ from .dagmenu import (
     DEFAULT_FILTERS,
     MAX_LINKS_PER_DAG,
     MAX_RECEPTEN,
+    max_minuten,
     opties_prompt,
     opties_toepassen,
     recepten_selectie,
@@ -426,12 +428,18 @@ class Eten:
         self.s: dict[str, Any] = {}
         self._sync_ts = 0.0
         self._sitemaps: dict[str, dict] = {}
+        self._index_store: Store = Store(self.hass, 1, f"boodschappen.{entry_id}.bronindex")
+        self.idx: dict[str, dict] = {}  # per bron (domein+pad): {naam, links, ts, klaar, d: {url: samenvatting}}
+        self._index_wek = asyncio.Event()
         self._zoek_nota = ""
         self._ooit_gelezen = False
         self.extern: list[dict] = []  # agenda-events zonder kenmerk (bijv. handmatig ingevoerd)
         self.sync_fout: str | None = None
 
     async def async_load(self) -> None:
+        self.idx = ((await self._index_store.async_load()) or {}).get("bronnen", {})
+        for e in self.idx.values():
+            e["bezig"] = None
         data = await self._store.async_load() or {}
         self.s = {
             "recepten": data.get("recepten", {}),
@@ -709,8 +717,10 @@ class Eten:
             soorten = (self.s["feedback"].get(r["id"]) or {}).get("soorten") or {}
             i["wel"] += 1 if "wel_lekker" in soorten else 0
             i["niet"] += 1 if "niet_lekker" in soorten else 0
+        per_naam = {b["naam"]: self.idx.get(self._bron_sleutel(b)) for b in bronnen if b["type"] == "website"}
         return {n: {"recepten": i["recepten"], "score": round(sum(i["scores"]) / len(i["scores"]), 1) if i["scores"] else None,
-                    "wel": i["wel"], "niet": i["niet"]} for n, i in info.items()}
+                    "wel": i["wel"], "niet": i["niet"],
+                    "index": bix.status(per_naam[n]) if n in per_naam else None} for n, i in info.items()}
 
     def bronnen_opslaan(self, lijst: list[dict]) -> None:
         """De hele bronnenlijst vervangen. Een bron met 'oud' (vorige naam) is hernoemd: recepten die eraan hangen gaan mee."""
@@ -727,6 +737,7 @@ class Eten:
                 r["bron_naam"] = next(b["naam"] for b in schoon if b["naam"].lower() == hernoemd[bn].lower())
         self.inst["bronnen"] = schoon
         self.save()
+        self._index_wek.set()  # nieuwe bron: meteen gaan indexeren
 
     def recept_bron_zetten(self, rid: str, bron_naam: str | None, eigen: bool = False) -> None:
         """Herkomst van een recept met de hand koppelen: aan een bron, als eigen recept, of terug naar onbekend."""
@@ -764,10 +775,10 @@ class Eten:
         return {"ts": time.time(), "links": [], "wachtrij": list(dict.fromkeys(uit_robots)),
                 "reserve": [basis + p for p in SITEMAP_PADEN], "gelezen": 0, "klaar": False}
 
-    async def _sitemap_verder(self, bron: dict, e: dict, budget: float) -> None:
+    async def _sitemap_verder(self, bron: dict, e: dict, budget: float, max_sitemaps: int = MAX_SITEMAPS) -> None:
         """Lees sitemaps tot de tijd op is of alles gelezen is. Vier tegelijk; alleen links die bij de bron horen blijven."""
         eind = time.monotonic() + budget
-        while time.monotonic() < eind and e["gelezen"] < MAX_SITEMAPS and len(e["links"]) < MAX_LINKS:
+        while time.monotonic() < eind and e["gelezen"] < max_sitemaps and len(e["links"]) < MAX_LINKS:
             if not e["wachtrij"]:
                 if e["reserve"] and not e["links"]:
                     e["wachtrij"], e["reserve"] = e["reserve"], []
@@ -801,13 +812,116 @@ class Eten:
     async def _bron_links(self, bron: dict, vernieuw: bool = False, budget: float = 40.0) -> tuple[list[str], dict]:
         """Mogelijke receptlinks van een websitebron. Grote sites worden stap voor stap ingelezen (en een dag onthouden);
         status: {klaar, gelezen, wachtrij}."""
-        sleutel = bron["domein"] + bron.get("pad", "")
+        sleutel = self._bron_sleutel(bron)
+        ix = self.idx.get(sleutel)
+        if not vernieuw and ix and ix.get("klaar") and ix.get("links"):
+            return list(ix["links"]), {"klaar": True, "gelezen": 0, "wachtrij": 0, "index": True}
         e = self._sitemaps.get(sleutel)
         if vernieuw or e is None or (e["klaar"] and time.time() - e["ts"] > SITEMAP_BEWAAR):
             e = self._sitemaps[sleutel] = await self._sitemap_start(bron)
         if not e["klaar"]:
             await self._sitemap_verder(bron, e, budget)
+        if e["klaar"] and e["links"] and sleutel in {self._bron_sleutel(b) for b in self.inst["bronnen"]}:
+            # meteen in de index, zodat het na een herstart niet opnieuw hoeft
+            ix = self.idx.setdefault(sleutel, {"naam": bron["naam"], "links": [], "ts": 0, "klaar": False, "d": {}})
+            ix.update({"links": e["links"][:bix.LINKS_MAX], "ts": time.time(), "klaar": True})
+            self._index_opslaan()
         return list(e["links"]), {"klaar": e["klaar"], "gelezen": e["gelezen"], "wachtrij": len(e["wachtrij"])}
+
+    @staticmethod
+    def _bron_sleutel(bron: dict) -> str:
+        return bron["domein"] + bron.get("pad", "")
+
+    def _index_opslaan(self) -> None:
+        self._index_store.async_delay_save(lambda: {"bronnen": self.idx}, 30)
+
+    def _index_details(self, bron: dict) -> dict:
+        return (self.idx.get(self._bron_sleutel(bron)) or {}).get("d") or {}
+
+    def index_vernieuwen(self, naam: str | None = None) -> None:
+        """Linklijst (van één bron of alle bronnen) opnieuw inlezen; mislukte pagina's opnieuw proberen."""
+        for b in self.inst["bronnen"]:
+            if b["type"] != "website" or (naam and b["naam"].lower() != naam.lower()):
+                continue
+            e = self.idx.get(self._bron_sleutel(b))
+            if e:
+                e["ts"] = 0
+                e["melding"] = None
+                e["d"] = {u: d for u, d in e["d"].items() if not (isinstance(d, dict) and d.get("fout"))}
+        self._index_opslaan()
+        self._index_wek.set()
+
+    async def index_werker(self) -> None:
+        """Achtergrondtaak: houdt de index van alle websitebronnen bij. Rustig, één pagina per paar seconden per site."""
+        await asyncio.sleep(90)  # eerst Home Assistant laten opstarten
+        while True:
+            self._index_wek.clear()
+            try:
+                await self._index_ronde()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - de index is een hulpmiddel; nooit de integratie laten vallen
+                _LOGGER.exception("Bronindex bijwerken mislukte")
+            try:
+                await asyncio.wait_for(self._index_wek.wait(), timeout=6 * 3600)
+            except TimeoutError:
+                pass
+
+    async def _index_ronde(self) -> None:
+        bronnen = [b for b in self.inst["bronnen"] if b["type"] == "website" and b.get("aan", True)]
+        sleutels = {self._bron_sleutel(b) for b in self.inst["bronnen"] if b["type"] == "website"}
+        for weg in [k for k in self.idx if k not in sleutels]:
+            self.idx.pop(weg)  # bron verwijderd
+        for b in bronnen:
+            sl = self._bron_sleutel(b)
+            e = self.idx.setdefault(sl, {"naam": b["naam"], "links": [], "ts": 0, "klaar": False, "d": {}})
+            e["naam"] = b["naam"]
+            if not e["links"] or time.time() - (e.get("ts") or 0) > bix.LINKS_VERNIEUW:
+                e["bezig"] = "links"
+                try:
+                    sm = await self._sitemap_start(b)
+                    for _ in range(40):
+                        await self._sitemap_verder(b, sm, 60, max_sitemaps=80)
+                        if sm["klaar"] or sm["gelezen"] >= 80:
+                            break
+                    if sm["links"]:
+                        sm["klaar"] = True
+                        self._sitemaps[sl] = sm
+                        e.update({"links": sm["links"][:bix.LINKS_MAX], "klaar": True, "melding": None})
+                    else:
+                        e["melding"] = "Geen receptlinks gevonden in de sitemap"
+                except Exception as err:  # noqa: BLE001
+                    e["melding"] = f"Sitemap niet te lezen: {err}"
+                e["ts"] = time.time()
+                self._index_opslaan()
+            todo = bix.te_indexeren(e["links"], e["d"], time.time())
+            if not todo:
+                e["bezig"] = None
+                continue
+            e["bezig"] = "recepten"
+            fouten = 0
+            for n, u in enumerate(todo, 1):
+                try:
+                    page = await self._haal(u, 3_000_000)
+                    item = bix.index_item(page, html_naar_tekst(page)[:20000])
+                    e["d"][u] = item or bix.GEEN_RECEPT
+                    fouten = 0
+                except asyncio.CancelledError:
+                    self._index_opslaan()
+                    raise
+                except Exception as err:  # noqa: BLE001
+                    e["d"][u] = {"fout": str(err)[:80], "ts": time.time()}
+                    fouten += 1
+                    if fouten >= bix.MAX_FOUTEN_OP_RIJ:
+                        e["melding"] = f"De site weigert pagina's ({err}); later opnieuw"
+                        break
+                if n % 25 == 0:
+                    self._index_opslaan()
+                if sum(1 for d in e["d"].values() if bix.is_recept(d)) >= bix.INDEX_MAX:
+                    break
+                await asyncio.sleep(bix.PAUZE)
+            e["bezig"] = None
+            self._index_opslaan()
 
     async def bron_controleren(self, url: str) -> dict:
         """Een nieuwe bron nakijken: naam, kunnen we er recepten van lezen en kunnen we erin zoeken."""
@@ -876,12 +990,25 @@ class Eten:
                              + " Plak een link of gebruik een foto.")
         self._zoek_nota = ("Nog niet alles ingelezen: " + ", ".join(bezig) + ". Zoek straks nog eens voor meer resultaten.") if bezig else ""
         vraag = (vraag or "").strip()
+        det: dict[str, Any] = {}
+        for b in bronnen:
+            det.update(self._index_details(b))
+
+        def titel(u: str) -> str:
+            return det[u]["t"] if bix.is_recept(det.get(u)) else titel_uit_url(u)
+
         if not ai:
-            links = zoek_links(list(per_url), vraag, klaar, 12)
-            return {"resultaten": [{"url": u, "titel": titel_uit_url(u), "bron": per_url[u], "reden": ""} for u in links],
+            if det and vraag:
+                links = [u for u in bix.index_kandidaten(list(per_url), det, _vraagwoorden(vraag), klaar, url_sleutel, 60)
+                         if bix.score_item(titel(u), det.get(u) if bix.is_recept(det.get(u)) else None, _vraagwoorden(vraag)) > 0][:12]
+            if not det or not vraag or not links:
+                links = zoek_links([u for u in per_url if det.get(u) != bix.GEEN_RECEPT], vraag, klaar, 12)
+            return {"resultaten": [{"url": u, "titel": titel(u), "bron": per_url[u], "reden": ""} for u in links],
                     "nota": self._zoek_nota}
-        kand = kandidaten_voor_ai(list(per_url), vraag, klaar, 300)
-        kandidaten = [{"n": n, "url": u, "titel": titel_uit_url(u), "bron": per_url[u]} for n, u in enumerate(kand, 1)]
+        kand = bix.index_kandidaten(list(per_url), det, _vraagwoorden(vraag), klaar, url_sleutel, 200)
+        kandidaten = [{"n": n, "url": u, "titel": titel(u), "bron": per_url[u],
+                       "regel": bix.link_regel(str(n), titel(u), per_url[u], det[u]) if bix.is_recept(det.get(u)) else None}
+                      for n, u in enumerate(kand, 1)]
         voorraad, _bijna = await self._voorraad()
         namen = {p["id"]: p["name"] for p in self._producten()}
         in_huis = sorted({namen[pid] for pid, a in voorraad.items() if a and pid in namen})[:80]
@@ -1328,10 +1455,20 @@ class Eten:
             except Exception as err:  # noqa: BLE001 - één bron die niet wil mag de rest niet tegenhouden
                 stuur({"soort": "stap", "id": sid, "status": "fout", "tekst": f"{b['naam']}: niet bereikbaar ({err})"})
                 continue
-            kand = kandidaten_voor_ai(links, vraag, klaar, per_bron)
+            det = self._index_details(b)
+            bonus = (bijna_op + in_huis[:60] if f["voorraad"] else []) + (actie_namen if f["aanbieding"] else [])
+            kand = bix.index_kandidaten(links, det, _vraagwoorden(vraag), klaar, url_sleutel, per_bron,
+                                        max_tijd=max_minuten(dag.get("minuten"), f["snel"]) if f["snel"] else None, bonus=bonus)
+            met = 0
             for u in kand:
-                link_codes.append({"code": f"L{len(link_codes) + 1}", "url": u, "titel": titel_uit_url(u), "bron": b["naam"]})
-            tekst = f"{b['naam']}: {len(links)} recepten gevonden, {len(kand)} voorgelegd"
+                item = det.get(u) if bix.is_recept(det.get(u)) else None
+                met += 1 if item else 0
+                titel = item["t"] if item else titel_uit_url(u)
+                link_codes.append({"code": f"L{len(link_codes) + 1}", "url": u, "titel": titel, "bron": b["naam"], "item": item,
+                                   "regel": bix.link_regel(f"L{len(link_codes) + 1}", titel, b["naam"], item)})
+            n_rec = sum(1 for d in det.values() if bix.is_recept(d))
+            tekst = (f"{b['naam']}: {len(links)} links, {n_rec} recepten met gegevens; {len(kand)} voorgelegd"
+                     + (f" ({met} met tijd en ingrediënten)" if met else ""))
             if not status["klaar"]:
                 tekst += " (nog niet alles ingelezen)"
             stuur({"soort": "stap", "id": sid, "status": "klaar" if kand else "fout", "tekst": tekst})
@@ -1359,9 +1496,13 @@ class Eten:
                     "reden": o["reden"], "labels": labels_voor(rec, voorraad, bijna, acties, namen),
                 })
             else:
+                item = o.get("item") or {}
+                labels = {"actie": bix.namen_in(item, actie_namen), "bijna_op": bix.namen_in(item, bijna_op),
+                          "in_huis": [x for x in bix.namen_in(item, in_huis) if x not in bijna_op]} if item else {}
                 opties.append({
                     "id": nieuw_id(), "soort": "link", "recept_id": None, "titel": o["titel"], "url": o["url"],
-                    "bron": o["bron"], "tijd": None, "vega": False, "reden": o["reden"], "labels": {},
+                    "bron": o["bron"], "tijd": item.get("tijd"), "vega": item.get("v") is True, "reden": o["reden"],
+                    "labels": labels, "foto": item.get("f"),
                 })
         duur = round(time.monotonic() - t0)
         self.s["dagopties"][datum] = {"opties": opties, "filters": f, "aanwezig": dag["aanwezig"],
@@ -1707,6 +1848,7 @@ class Eten:
             self.inst["profielen"] = [bestaand.get(n, {"naam": n}) for n in self.inst["personen"]]
         self.inst.update(schoon_menu(self.inst))
         self.inst["bronnen"] = schoon_bronnen(self.inst.get("bronnen"))
+        self._index_wek.set()
         self._sync_ts = 0
         self.save()
 

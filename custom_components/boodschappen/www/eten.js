@@ -213,7 +213,7 @@ class EtenPanel extends HTMLElement {
       else if (v.soort === "voorstel") main.innerHTML = this._voorstelView();
       else if (v.soort === "dag") main.innerHTML = this._dagView();
       else if (v.soort === "benodigd") main.innerHTML = this._benodigdView();
-      else if (v.soort === "bronnen") main.innerHTML = this._bronnenView();
+      else if (v.soort === "bronnen") { main.innerHTML = this._bronnenView(); this._indexVolgen(); }
       else if (v.soort === "ontdek") main.innerHTML = this._ontdekView();
       main.classList.toggle("koken", v.soort === "koken");
     } else {
@@ -1209,8 +1209,9 @@ class EtenPanel extends HTMLElement {
         <div class="bronkop"><b>${esc(b.naam)}</b><span class="typebadge">${esc(BRON_TYPE[b.type] || b.type)}</span><span class="vul"></span>
           <label class="check klein" title="Uit: deze bron doet niet mee bij Ontdek"><input type="checkbox" data-bronaan="${i}" ${b.aan === false ? "" : "checked"}> aan</label></div>
         ${adres ? `<p class="rmeta">${adres}</p>` : ""}
-        <p class="rmeta"><span>${inf.recepten} ${inf.recepten === 1 ? "recept" : "recepten"}</span>${inf.score ? `<span class="score">${GEZICHT[Math.round(inf.score)]} gem. ${fmtNum(inf.score)}</span>` : ""}${
+        <p class="rmeta"><span>${inf.recepten} ${inf.recepten === 1 ? "recept" : "recepten"} bewaard</span>${inf.score ? `<span class="score">${GEZICHT[Math.round(inf.score)]} gem. ${fmtNum(inf.score)}</span>` : ""}${
           inf.wel ? `<span>👍 ${inf.wel}</span>` : ""}${inf.niet ? `<span>👎 ${inf.niet}</span>` : ""}</p>
+        ${b.type === "website" ? this._indexRegel(inf.index, b) : ""}
         ${b.notitie ? `<p class="hint">${esc(b.notitie)}</p>` : ""}
         <div class="knoppen klein">
           ${b.type === "website" ? `<button class="sec-btn" data-act="ontdek" data-bron="${esc(b.naam)}">🔎 Zoek recepten</button>` : `<button class="sec-btn" data-act="nieuw" data-bron="${esc(b.naam)}">📷 Recept uit foto</button>`}
@@ -1238,6 +1239,33 @@ class EtenPanel extends HTMLElement {
         <button class="primary" data-act="bronnieuw">Bron toevoegen</button>
         ${n.type !== "website" ? `<p class="hint">Recepten uit een boek voeg je toe met een foto van de pagina (bij + → Foto van een recept) en kies daar deze bron.</p>` : ""}
       </section>`;
+  }
+
+  _indexRegel(ix, b) {
+    if (b.aan === false) return `<p class="indexregel">📇 Index staat stil zolang de bron uit staat.</p>`;
+    if (!ix || (!ix.links && !ix.bezig && !ix.melding)) return `<p class="indexregel">📇 Index: wordt zo opgebouwd…</p>`;
+    const datum = ix.ts ? new Date(ix.ts * 1000).toLocaleDateString("nl-NL", { day: "numeric", month: "short" }) : "";
+    let t;
+    if (ix.bezig === "links") t = "⏳ Receptenlijst inlezen…";
+    else {
+      t = `📇 Index: ${ix.recepten.toLocaleString("nl-NL")} recepten met tijd en ingrediënten (${ix.links.toLocaleString("nl-NL")} links)`;
+      if (ix.bezig === "recepten") t += ` · <span class="spinner klein"></span> bezig met ophalen`;
+      else if (datum) t += ` · bijgewerkt ${esc(datum)}`;
+    }
+    const knop = ix.bezig ? "" : `<button class="link" data-act="bronindex" data-bron="${esc(b.naam)}">Opnieuw indexeren</button>`;
+    return `<p class="indexregel">${t} ${knop}</p>${ix.melding ? `<p class="hint">⚠ ${esc(ix.melding)}</p>` : ""}`;
+  }
+
+  _indexVolgen() {
+    // tijdens het indexeren de stand af en toe bijwerken (alleen op de bronnenpagina, niet tijdens typen)
+    const bezig = Object.values(this.d?.bronnen_info || {}).some((i) => i.index && i.index.bezig);
+    if (!bezig || this._bixTimer) return;
+    this._bixTimer = setTimeout(() => {
+      this._bixTimer = null;
+      const a = this.shadowRoot && this.shadowRoot.activeElement;
+      if (this.view?.soort === "bronnen" && !this.busy && this.bronEdit == null && !(a && /INPUT|SELECT|TEXTAREA/.test(a.tagName))) this._load();
+      else if (this.view?.soort === "bronnen") this._indexVolgen();
+    }, 15000);
   }
 
   async _bronnenOpslaan(lijst, bezig = "Bronnen opslaan…") {
@@ -1954,6 +1982,8 @@ class EtenPanel extends HTMLElement {
         this.bronEdit = null;
         this._scrollTop = true;
         return this._render();
+      case "bronindex":
+        return this._do({ type: "boodschappen/eten_index_vernieuwen", naam: b.dataset.bron }, "Index vernieuwen…");
       case "bronbewerk":
         this.bronEdit = Number(b.dataset.i);
         return this._render();
@@ -2627,6 +2657,8 @@ header h1 { font-size: 20px; font-weight: 400; margin: 0 0 0 8px; flex: 1; }
 .meekijk summary::-webkit-details-marker { display: none; }
 .meekijk summary::after { content: "▾"; margin-left: auto; color: var(--secondary-text-color); }
 .meekijk[open] summary::after { transform: rotate(180deg); }
+.indexregel { margin: 4px 0; font-size: 13px; color: var(--secondary-text-color); display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+.indexregel .link { font-size: 13px; padding: 0; }
 .spinner.klein { display: inline-block; width: 14px; height: 14px; border-width: 2px; vertical-align: -2px; }
 .mstappen { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 4px; font-size: 14px; }
 .mstappen li { display: flex; gap: 8px; align-items: baseline; }

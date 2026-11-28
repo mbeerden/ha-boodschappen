@@ -4,6 +4,7 @@ en de websocket-stream zoals het scherm die gebruikt.
 Draaien: python3 tests/dagplanner_smoke.py
 """
 import asyncio
+import time
 from datetime import date, timedelta
 import json
 import re
@@ -187,13 +188,42 @@ async def main():
           f"3 opties, eerste een link van de bron ({[o['titel'] for o in opties]})")
     check(opties[1]["recept_id"] in (soep, wraps) and opties[1]["bron"] == "Mijn bibliotheek", "eigen recept als optie")
     check("gedachte" not in soorten and any("AI-taak" in x.get("tekst", "") for x in ev), "zonder sleutel: AI-taak, geen gedachten")
-    check(any(x.get("id") == "bron-Testkok" and "2 recepten gevonden" in x["tekst"] for x in ev), "stap: bron ingelezen")
+    check(any(x.get("id") == "bron-Testkok" and "2 links" in x["tekst"] for x in ev), "stap: bron ingelezen")
     check(ai_vragen == ["Eten: dagvoorstel"], "één lichte AI-vraag")
     p = PROMPTS[-1]
     check("hooguit 30 minuten" in p and "In huis: Uien" in p and "In de aanbieding" not in p and "Producten (id" not in p,
           "prompt volgt de vinkjes en is licht")
     check(e.s["dagopties"][morgen]["filters"]["snel"] and e.inst["dagfilters"]["bronnen"] == ["__bibliotheek__", "Testkok"],
           "opties en vinkjes bewaard")
+
+    # 1b. bronindex: links stonden al in de index (na het inlezen); de achtergrondronde haalt de receptgegevens op
+    from custom_components.boodschappen import bronindex as bix
+    bix.PAUZE = 0
+    sl = "127.0.0.1"
+    check(e.idx.get(sl, {}).get("klaar") and len(e.idx[sl]["links"]) == 2, "links na het inlezen meteen in de index")
+    await e._index_ronde()
+    st = bix.status(e.idx[sl])
+    check(st["recepten"] == 2 and st["bezig"] is None, f"achtergrondronde haalt receptgegevens op ({st})")
+    item = e.idx[sl]["d"]["http://127.0.0.1:9193/linzensoep-met-kokos"]
+    check(item["t"] == "Linzensoep met kokos" and item["v"] is True and "rode linzen" in item["i"], f"samenvatting van het recept ({item})")
+    links, status = await e._bron_links(e.inst["bronnen"][0])
+    check(status.get("index") and len(links) == 2, "links komen daarna uit de index (geen sitemap meer lezen)")
+    info = e.bronnen_info()["Testkok"]["index"]
+    check(info["recepten"] == 2 and info["links"] == 2, "indexstatus in het paneel")
+    await e._index_store.async_save({"bronnen": e.idx})
+    opgeslagen = await e._index_store.async_load()
+    check(len(opgeslagen["bronnen"][sl]["d"]) == 2, "index blijft bewaard (overleeft een herstart)")
+    ev.clear()
+    PROMPTS.clear()
+    opties_i = await e.dag_opties(morgen, {"voorraad": True, "snel": False, "aanbieding": False, "bronnen": ["Testkok"], "wens": "linzen"},
+                                  ["A", "B"], ev.append)
+    check("| ingrediënten:" in PROMPTS[-1] and "vega" in PROMPTS[-1], "prompt bevat tijd/vega/ingrediënten uit de index")
+    lo = next(o for o in opties_i if o["soort"] == "link")
+    check(lo["titel"] == "Linzensoep met kokos" and lo["vega"] and lo["labels"].get("in_huis") == ["Uien"],
+          f"optiekaart met gegevens en labels uit de index ({lo})")
+    e.index_vernieuwen("Testkok")
+    check(e.idx[sl]["ts"] == 0, "opnieuw indexeren zet de linklijst klaar voor vernieuwen")
+    e.idx[sl]["ts"] = time.time()
 
     # alleen de bron (geen bibliotheek): geen R-nummers
     ev.clear()

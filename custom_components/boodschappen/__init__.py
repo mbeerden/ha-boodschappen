@@ -44,7 +44,7 @@ PANEL_URL = "boodschappen"
 ETEN_URL = "eten"
 KLUSJES_URL = "klusjes"
 STATIC_URL = "/boodschappen_static"
-VERSION = "0.13.1"
+VERSION = "0.14.0"
 
 BON_SCHEMA = vol.Schema(
     {
@@ -87,6 +87,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.producten = Producten(coordinator)
     coordinator.eten = Eten(coordinator, entry.entry_id)
     await coordinator.eten.async_load()
+    entry.async_create_background_task(hass, coordinator.eten.index_werker(), "boodschappen bronindex")
     coordinator.klusjes = Klusjes(coordinator, entry.entry_id)
     await coordinator.klusjes.async_load()
     entry.runtime_data = coordinator
