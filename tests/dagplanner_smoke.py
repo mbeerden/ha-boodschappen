@@ -38,6 +38,16 @@ def kies_uit(prompt: str) -> list[dict]:
     return [{"keuze": k, "reden": f"reden {k}"} for k in keuze]
 
 
+def koppel_antwoord(instr: str) -> dict:
+    """Nep-antwoord op de koppelvraag bij het overnemen van een recept."""
+    blok = instr.split("Ingrediënten:\n", 1)[1].split("\nBereiding:", 1)[0]
+    regels = [x.split(". ", 1)[1] for x in blok.splitlines() if ". " in x]
+    pid = {"2 uien": 15, "250 g rode linzen": 7}
+    return {"taal": "nl", "naam": "Linzensoep met kokos", "vega": True, "tags": ["soep"], "tijd": 30,
+            "ingredienten": [{"tekst": x, "product_id": pid.get(x), "aantal": 2, "basis": x == "zout"} for x in regels],
+            "stappen": ["Fruit de uien.", "Kook de linzen 20 minuten."]}
+
+
 async def main():
     app = fake_grocy()
 
@@ -66,8 +76,11 @@ async def main():
         body = await req.json()
         gemini_vragen.append({"key": req.headers.get("x-goog-api-key"), "pad": req.path, "body": body})
         prompt = body["contents"][0]["parts"][0]["text"]
-        PROMPTS.append(prompt)
-        antwoord = json.dumps(kies_uit(prompt))
+        if "recept van een kok" in prompt:
+            antwoord = json.dumps(koppel_antwoord(prompt))
+        else:
+            PROMPTS.append(prompt)
+            antwoord = json.dumps(kies_uit(prompt))
         resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await resp.prepare(req)
         delen = [{"text": "**Wie eet er mee**\n\nTwee volwassenen, één vega.", "thought": True},
@@ -130,12 +143,7 @@ async def main():
             PROMPTS.append(instr)
             return {"data": json.dumps(kies_uit(instr))}
         if "recept van een kok" in instr:
-            blok = instr.split("Ingrediënten:\n", 1)[1].split("\nBereiding:", 1)[0]
-            regels = [x.split(". ", 1)[1] for x in blok.splitlines() if ". " in x]
-            pid = {"2 uien": 15, "250 g rode linzen": 7}
-            return {"data": json.dumps({"taal": "nl", "naam": "Linzensoep met kokos", "vega": True, "tags": ["soep"], "tijd": 30,
-                                        "ingredienten": [{"tekst": x, "product_id": pid.get(x), "aantal": 2, "basis": x == "zout"} for x in regels],
-                                        "stappen": ["Fruit de uien.", "Kook de linzen 20 minuten."]})}
+            return {"data": json.dumps(koppel_antwoord(instr))}
         return {"data": "{}"}
 
     hass.services.async_register("ai_task", "generate_data", ai, supports_response=SupportsResponse.ONLY)
@@ -225,6 +233,10 @@ async def main():
     check(item["lijst"] == [{"list_id": item["lijst"][0]["list_id"], "product_id": 7, "aantal": 1.0}] and item["uit_voorraad"] == {"15": 1.0},
           "maaltijd onthoudt lijstregels en voorraad")
     check(any(x.get("id") == "ophalen" and x["status"] == "klaar" for x in ev) and morgen not in e.s["dagopties"], "stappen bij plannen, opties opgeruimd")
+    kv = gemini_vragen[-1]["body"]
+    check("recept van een kok" in kv["contents"][0]["parts"][0]["text"] and kv["generationConfig"]["maxOutputTokens"] >= 16000
+          and "thinkingConfig" not in kv["generationConfig"] and "Eten: recept koppelen" not in ai_vragen,
+          "koppelen gaat direct naar Gemini met ruime antwoordlengte (geen MAX_TOKENS)")
 
     # tweede dag gebruikt ook ui: de ene ui is al voor morgen → nu kopen
     STATE["log"].clear()

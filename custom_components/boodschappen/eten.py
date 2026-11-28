@@ -1847,6 +1847,19 @@ class Eten:
 
     # --- AI ---------------------------------------------------------------
     async def _vraag_ai(self, taak: str, instructie: str, attachments: list[dict] | None = None) -> Any:
+        km = None if attachments else sleutel_en_model(self.hass)
+        if km:
+            # rechtstreeks naar Gemini: sneller en zonder de korte maximale antwoordlengte van de AI-taak
+            key, model = km
+            try:
+                tekst = await gemini_stream(async_get_clientsession(self.hass), key, model, instructie,
+                                            lambda _t: None, gedachten=False, timeout=180)
+                res = parse_json(tekst)
+                if res is not None:
+                    return res
+                _LOGGER.warning("%s: geen JSON van Gemini, via de AI-taak: %s", taak, tekst[:200])
+            except GeminiNietBeschikbaar as err:
+                _LOGGER.info("%s: Gemini direct lukte niet (%s), via de AI-taak", taak, err)
         ent = self.inst.get("ai") or next(iter(sorted(self.hass.states.async_entity_ids("ai_task"))), None)
         if not ent:
             raise ValueError("Geen AI-taak (ai_task) gevonden")

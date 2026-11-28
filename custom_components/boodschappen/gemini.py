@@ -20,6 +20,7 @@ _LOGGER = logging.getLogger(__name__)
 
 GOOGLE_DOMEIN = "google_generative_ai_conversation"
 STANDAARD_MODEL = "gemini-2.5-flash"
+MAX_TOKENS = 32768  # ruim: een vertaald recept met koppelingen past niet in de standaard van de Google-integratie
 API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?alt=sse"
 
 
@@ -71,10 +72,12 @@ async def stream(
     op_gedachte: Callable[[str], Awaitable[None] | None],
     json_antwoord: bool = True,
     timeout: float = 90,
+    gedachten: bool = True,
+    max_tokens: int = MAX_TOKENS,
 ) -> str:
     """Vraag Gemini met streaming. Gedachten gaan naar op_gedachte; het antwoord (tekst) komt terug."""
     async def vraag(met_gedachten: bool) -> str:
-        cfg: dict[str, Any] = {}
+        cfg: dict[str, Any] = {"maxOutputTokens": max_tokens}
         if json_antwoord:
             cfg["responseMimeType"] = "application/json"
         if met_gedachten:
@@ -113,7 +116,7 @@ async def stream(
 
     try:
         try:
-            return await vraag(True)
+            return await vraag(gedachten)
         except _GeenGedachten as err:
             # model zonder denkstand (of andere instelling): dan zonder gedachten
             _LOGGER.debug("Gemini zonder gedachten: %s", err)
